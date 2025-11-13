@@ -208,7 +208,11 @@ app.prepare().then(() => {
       
       // Initialize per-player options (each player gets a copy of all options)
       for (const player of room.players) {
-        const playerOptionsCopy = room.options.map(opt => ({ ...opt }));
+        const playerOptionsCopy = room.options.map(opt => ({ 
+          ...opt,
+          state: 'normal',
+          discardedForPlayerId: null
+        }));
         room.playerOptions.set(player.id, playerOptionsCopy);
         player.hasFinished = false;
         player.guessedOptionId = null;
@@ -258,48 +262,38 @@ app.prepare().then(() => {
       });
     });
     
-    socket.on('eliminateOptions', ({ roomId, optionIds }) => {
+    socket.on('cycleOptionState', ({ roomId, optionId, targetPlayerId }) => {
       const normalizedRoomId = normalizeRoomId(roomId);
       const room = rooms.get(normalizedRoomId);
       if (!room) return;
       
-      // Only non-turn players can eliminate options
-      if (room.currentTurnPlayerId === socket.id) {
-        socket.emit('error', { message: 'You cannot eliminate options on your turn' });
-        return;
-      }
+      const player = room.players.find(p => p.id === socket.id);
+      if (!player || player.hasFinished) return;
       
-      if (room.gamePhase !== 'elimination') {
-        socket.emit('error', { message: 'Can only eliminate options after a question is asked' });
-        return;
-      }
-      
+      // Get the player's options
       const playerOptions = room.playerOptions.get(socket.id);
       if (!playerOptions) return;
       
-      // Eliminate options for this player only
-      for (const optionId of optionIds) {
-        const option = playerOptions.find(o => o.id === optionId);
-        if (option) {
-          option.eliminated = true;
-        }
+      const option = playerOptions.find(o => o.id === optionId);
+      if (!option) return;
+      
+      // Cycle through states: normal -> discarded -> possibleGuess -> normal
+      if (!option.state || option.state === 'normal') {
+        // First click: mark as discarded for target player
+        option.state = 'discarded';
+        option.discardedForPlayerId = targetPlayerId || socket.id;
+      } else if (option.state === 'discarded') {
+        // Second click: mark as possible guess
+        option.state = 'possibleGuess';
+        option.discardedForPlayerId = null;
+      } else if (option.state === 'possibleGuess') {
+        // Third click: back to normal
+        option.state = 'normal';
+        option.discardedForPlayerId = null;
       }
       
       // Send updated options to this player
       io.to(socket.id).emit('playerOptions', { options: playerOptions });
-      
-      io.to(normalizedRoomId).emit('optionsEliminated', { 
-        playerId: socket.id,
-        optionIds 
-      });
-      
-      io.to(normalizedRoomId).emit('roomUpdate', {
-        players: room.players,
-        options: room.options,
-        gamePhase: room.gamePhase,
-        currentTurnPlayerId: room.currentTurnPlayerId,
-        roomName: room.name,
-      });
     });
     
     socket.on('nextTurn', ({ roomId }) => {
@@ -337,7 +331,7 @@ app.prepare().then(() => {
       checkGameEnd(room, normalizedRoomId, io);
     });
     
-    socket.on('makeGuess', ({ roomId, optionId }) => {
+    socket.on('makeGuess', ({ roomId, optionId, confirmation }) => {
       const normalizedRoomId = normalizeRoomId(roomId);
       const room = rooms.get(normalizedRoomId);
       if (!room) return;
@@ -347,6 +341,12 @@ app.prepare().then(() => {
       
       if (player.hasFinished) {
         socket.emit('error', { message: 'You have already finished' });
+        return;
+      }
+      
+      // Require confirmation step
+      if (confirmation !== 'CONFIRMED') {
+        socket.emit('error', { message: 'Confirmation required' });
         return;
       }
       

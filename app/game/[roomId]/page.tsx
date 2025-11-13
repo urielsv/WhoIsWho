@@ -8,8 +8,9 @@ import { Badge } from '@/components/ui/badge';
 import { Textarea } from '@/components/ui/textarea';
 import { useSocket } from '@/lib/socket';
 import { useGameStore } from '@/lib/store';
-import { Trophy, MessageSquare, X, ArrowRight, CheckCircle, XCircle, FileText } from 'lucide-react';
+import { Trophy, MessageSquare, ArrowRight, CheckCircle, XCircle, FileText, HelpCircle, User } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import type { OptionState } from '@/types/game';
 
 export default function GamePage() {
   const router = useRouter();
@@ -35,9 +36,11 @@ export default function GamePage() {
     setMyNotes,
   } = useGameStore();
 
-  const [selectedOptions, setSelectedOptions] = useState<Set<string>>(new Set());
   const [showGuessModal, setShowGuessModal] = useState(false);
   const [guessOptionId, setGuessOptionId] = useState<string | null>(null);
+  const [guessStep, setGuessStep] = useState(1); // Multi-step confirmation
+  const [showPlayerSelect, setShowPlayerSelect] = useState<string | null>(null); // optionId for player selection
+  const [showHelp, setShowHelp] = useState(false);
 
   const isMyTurn = currentTurnPlayerId === playerId;
   const currentPlayer = players.find(p => p.id === currentTurnPlayerId);
@@ -60,23 +63,16 @@ export default function GamePage() {
     };
 
     const handlePlayerOptions = (data: any) => {
-      // Update options with per-player options
       setOptions(data.options);
     };
 
     const handleQuestionAsked = (data: any) => {
       setLastQuestion(`${data.playerName} asked a question`);
-      setSelectedOptions(new Set());
     };
 
     const handleTurnChanged = (data: any) => {
       setCurrentTurnPlayerId(data.currentTurnPlayerId);
       setLastQuestion(null);
-      setSelectedOptions(new Set());
-    };
-
-    const handleOptionsEliminated = (data: any) => {
-      setSelectedOptions(new Set());
     };
 
     const handlePlayerGuessed = (data: any) => {
@@ -95,7 +91,6 @@ export default function GamePage() {
     socket.on('playerOptions', handlePlayerOptions);
     socket.on('questionAsked', handleQuestionAsked);
     socket.on('turnChanged', handleTurnChanged);
-    socket.on('optionsEliminated', handleOptionsEliminated);
     socket.on('playerGuessed', handlePlayerGuessed);
     socket.on('playerGaveUp', handlePlayerGaveUp);
     socket.on('gameFinished', handleGameFinished);
@@ -105,7 +100,6 @@ export default function GamePage() {
       socket.off('playerOptions', handlePlayerOptions);
       socket.off('questionAsked', handleQuestionAsked);
       socket.off('turnChanged', handleTurnChanged);
-      socket.off('optionsEliminated', handleOptionsEliminated);
       socket.off('playerGuessed', handlePlayerGuessed);
       socket.off('playerGaveUp', handlePlayerGaveUp);
       socket.off('gameFinished', handleGameFinished);
@@ -116,43 +110,61 @@ export default function GamePage() {
     socket?.emit('askQuestion', { roomId });
   };
 
-  const toggleOption = (optionId: string) => {
-    if (gamePhase !== 'elimination') return;
-    if (isMyTurn) return; // Can't eliminate on your turn
-    if (hasFinished) return; // Can't eliminate if finished
+  const handleOptionClick = (optionId: string) => {
+    if (hasFinished) return;
     
-    const newSelected = new Set(selectedOptions);
-    if (newSelected.has(optionId)) {
-      newSelected.delete(optionId);
-    } else {
-      newSelected.add(optionId);
-    }
-    setSelectedOptions(newSelected);
-  };
+    const option = options.find(o => o.id === optionId);
+    if (!option || option.eliminated) return;
 
-  const handleEliminate = () => {
-    if (selectedOptions.size === 0) return;
-    if (isMyTurn) return;
-    socket?.emit('eliminateOptions', { 
+    // If option is in 'possibleGuess' state, show guess modal
+    if (option.state === 'possibleGuess') {
+      setGuessOptionId(optionId);
+      setShowGuessModal(true);
+      setGuessStep(1);
+      return;
+    }
+
+    // If option is 'normal', show player selection for discarding
+    if (!option.state || option.state === 'normal') {
+      setShowPlayerSelect(optionId);
+      return;
+    }
+
+    // Otherwise, cycle the state (discarded -> possibleGuess -> normal)
+    socket?.emit('cycleOptionState', { 
       roomId, 
-      optionIds: Array.from(selectedOptions) 
+      optionId,
+      targetPlayerId: option.discardedForPlayerId || playerId
     });
   };
 
-  const handleNextTurn = () => {
-    socket?.emit('nextTurn', { roomId });
+  const handleDiscardForPlayer = (optionId: string, targetPlayerId: string) => {
+    socket?.emit('cycleOptionState', { 
+      roomId, 
+      optionId,
+      targetPlayerId
+    });
+    setShowPlayerSelect(null);
   };
 
-  const handleMakeGuess = (optionId: string) => {
-    setGuessOptionId(optionId);
-    setShowGuessModal(true);
+  const handleNextGuessStep = () => {
+    if (guessStep === 1) {
+      setGuessStep(2);
+    } else if (guessStep === 2) {
+      setGuessStep(3);
+    }
   };
 
   const confirmGuess = () => {
-    if (guessOptionId) {
-      socket?.emit('makeGuess', { roomId, optionId: guessOptionId });
+    if (guessOptionId && guessStep === 3) {
+      socket?.emit('makeGuess', { 
+        roomId, 
+        optionId: guessOptionId,
+        confirmation: 'CONFIRMED'
+      });
       setShowGuessModal(false);
       setGuessOptionId(null);
+      setGuessStep(1);
     }
   };
 
@@ -167,14 +179,31 @@ export default function GamePage() {
     socket?.emit('updateNotes', { roomId, notes });
   };
 
+  const getOptionStateColor = (state: OptionState | undefined) => {
+    switch (state) {
+      case 'discarded':
+        return 'bg-gray-300 dark:bg-gray-700 opacity-60';
+      case 'possibleGuess':
+        return 'bg-green-200 dark:bg-green-900 border-green-500 ring-2 ring-green-500';
+      default:
+        return 'bg-card border-border';
+    }
+  };
+
+  const getOptionStateLabel = (state: OptionState | undefined, discardedForPlayerId?: string) => {
+    switch (state) {
+      case 'discarded':
+        const player = players.find(p => p.id === discardedForPlayerId);
+        return player ? `Discarded for ${player.username}` : 'Discarded';
+      case 'possibleGuess':
+        return 'Possible Guess';
+      default:
+        return '';
+    }
+  };
+
   if (gamePhase === 'finished') {
-    const winners = players.filter(p => {
-      const guessedOptionId = p.guessedOptionId;
-      if (!guessedOptionId) return false;
-      const secretOptionId = options.find(o => o.id === guessedOptionId)?.id;
-      // Check if their guess matches their secret (this would need server verification in real implementation)
-      return true; // Simplified for now
-    });
+    const winners = players.filter(p => p.guessedOptionId);
 
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800 flex items-center justify-center p-4">
@@ -216,13 +245,56 @@ export default function GamePage() {
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800 p-4">
       <div className="max-w-6xl mx-auto py-8">
         <div className="text-center mb-8">
-          <h1 className="text-4xl font-bold text-gray-900 dark:text-white mb-2">
-            {roomName}
-          </h1>
+          <div className="flex items-center justify-center gap-2 mb-2">
+            <h1 className="text-4xl font-bold text-gray-900 dark:text-white">
+              {roomName}
+            </h1>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => setShowHelp(!showHelp)}
+              className="h-8 w-8 p-0"
+            >
+              <HelpCircle className="w-4 h-4" />
+            </Button>
+          </div>
           <Badge variant="secondary" className="text-lg px-4 py-1">
             {gamePhase === 'question' ? 'Question Phase' : 'Elimination Phase'}
           </Badge>
         </div>
+
+        {showHelp && (
+          <Card className="mb-6 bg-blue-50 dark:bg-blue-950 border-blue-200 dark:border-blue-800">
+            <CardHeader>
+              <CardTitle className="text-lg flex items-center gap-2">
+                <HelpCircle className="w-5 h-5" />
+                How to Play
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-3 text-sm">
+              <div>
+                <strong className="text-blue-900 dark:text-blue-100">Click Options to Cycle States:</strong>
+                <ul className="list-disc list-inside mt-1 space-y-1 text-muted-foreground">
+                  <li><strong>1st Click:</strong> Mark as discarded (gray) - choose which player</li>
+                  <li><strong>2nd Click:</strong> Mark as possible guess (green highlight)</li>
+                  <li><strong>3rd Click:</strong> Back to normal</li>
+                </ul>
+              </div>
+              <div>
+                <strong className="text-blue-900 dark:text-blue-100">Making a Guess:</strong>
+                <p className="text-muted-foreground mt-1">
+                  Click an option marked as "Possible Guess" to start the guess process. You'll need to confirm 3 times to finalize your guess.
+                </p>
+              </div>
+              <div>
+                <strong className="text-blue-900 dark:text-blue-100">Discarding Options:</strong>
+                <p className="text-muted-foreground mt-1">
+                  When you click a normal option, you'll choose which player it's discarded for. This helps you track who might have which option.
+                </p>
+              </div>
+            </CardContent>
+          </Card>
+        )}
 
         {hasFinished && (
           <div className="mb-4 p-4 bg-yellow-500/10 border border-yellow-500 rounded-lg text-center">
@@ -268,25 +340,6 @@ export default function GamePage() {
                       </div>
                     )}
                     
-                    {!isMyTurn && !hasFinished && (
-                      <div className="flex gap-2">
-                        <Button 
-                          onClick={handleEliminate}
-                          disabled={selectedOptions.size === 0}
-                          className="flex-1"
-                        >
-                          <X className="w-4 h-4 mr-2" />
-                          Eliminate Selected ({selectedOptions.size})
-                        </Button>
-                      </div>
-                    )}
-                    
-                    {isMyTurn && (
-                      <p className="text-sm text-muted-foreground text-center">
-                        You cannot eliminate options on your turn. Wait for others to eliminate.
-                      </p>
-                    )}
-                    
                     <Button 
                       onClick={handleNextTurn}
                       variant="outline"
@@ -307,54 +360,53 @@ export default function GamePage() {
                   Your Options ({remainingOptions.length} remaining)
                 </CardTitle>
                 <CardDescription>
-                  {isMyTurn && gamePhase === 'elimination' 
-                    ? 'You cannot eliminate options on your turn'
-                    : gamePhase === 'elimination'
-                    ? 'Select options to eliminate based on the question'
-                    : 'Click an option to make a guess'}
+                  Click options to cycle: Normal → Discarded (gray) → Possible Guess (green) → Normal
                 </CardDescription>
               </CardHeader>
               <CardContent>
                 <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-2">
-                  {options.map((option) => (
-                    <button
-                      key={option.id}
-                      onClick={() => {
-                        if (hasFinished) return;
-                        if (gamePhase === 'elimination' && !isMyTurn) {
-                          toggleOption(option.id);
-                        } else if (!hasFinished) {
-                          handleMakeGuess(option.id);
-                        }
-                      }}
-                      disabled={option.eliminated || hasFinished}
-                      className={cn(
-                        "p-3 rounded-lg border-2 text-left transition-all",
-                        option.eliminated && "opacity-30 line-through bg-gray-100 dark:bg-gray-800",
-                        !option.eliminated && gamePhase === 'elimination' && !isMyTurn && !hasFinished && "hover:border-primary cursor-pointer",
-                        selectedOptions.has(option.id) && "border-destructive bg-destructive/10",
-                        !option.eliminated && !selectedOptions.has(option.id) && "border-border bg-card",
-                        option.id === mySecretOption && !option.eliminated && "ring-2 ring-yellow-500"
-                      )}
-                    >
-                      <div className="font-medium text-sm break-words">
-                        {option.text}
-                      </div>
-                      {option.id === mySecretOption && !option.eliminated && (
-                        <Badge variant="secondary" className="mt-1 text-xs">
-                          Your Secret
-                        </Badge>
-                      )}
-                    </button>
-                  ))}
+                  {options.map((option) => {
+                    const stateLabel = getOptionStateLabel(option.state, option.discardedForPlayerId);
+                    return (
+                      <button
+                        key={option.id}
+                        onClick={() => handleOptionClick(option.id)}
+                        disabled={option.eliminated || hasFinished}
+                        className={cn(
+                          "p-3 rounded-lg border-2 text-left transition-all relative",
+                          option.eliminated && "opacity-30 line-through bg-gray-100 dark:bg-gray-800 cursor-not-allowed",
+                          !option.eliminated && !hasFinished && "hover:border-primary cursor-pointer",
+                          getOptionStateColor(option.state),
+                          option.id === mySecretOption && !option.eliminated && "ring-2 ring-yellow-500"
+                        )}
+                      >
+                        <div className="font-medium text-sm break-words">
+                          {option.text}
+                        </div>
+                        {option.id === mySecretOption && !option.eliminated && (
+                          <Badge variant="secondary" className="mt-1 text-xs">
+                            Your Secret
+                          </Badge>
+                        )}
+                        {stateLabel && (
+                          <Badge 
+                            variant={option.state === 'possibleGuess' ? 'default' : 'outline'} 
+                            className="mt-1 text-xs"
+                          >
+                            {stateLabel}
+                          </Badge>
+                        )}
+                      </button>
+                    );
+                  })}
                 </div>
                 
                 {!hasFinished && (
-                  <div className="mt-4 flex gap-2">
+                  <div className="mt-4">
                     <Button
                       onClick={handleGiveUp}
                       variant="outline"
-                      className="flex-1"
+                      className="w-full"
                     >
                       <XCircle className="w-4 h-4 mr-2" />
                       Give Up
@@ -419,15 +471,16 @@ export default function GamePage() {
                         player.hasFinished && "opacity-60"
                       )}
                     >
-                      <div>
+                      <div className="flex items-center gap-2">
+                        <User className="w-4 h-4" />
                         {player.username}
                         {player.id === currentTurnPlayerId && " (Current)"}
-                        {player.hasFinished && (
-                          <Badge variant="outline" className="ml-2 text-xs">
-                            {player.guessedOptionId ? 'Guessed' : 'Gave Up'}
-                          </Badge>
-                        )}
                       </div>
+                      {player.hasFinished && (
+                        <Badge variant="outline" className="text-xs">
+                          {player.guessedOptionId ? 'Guessed' : 'Gave Up'}
+                        </Badge>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -437,23 +490,119 @@ export default function GamePage() {
         </div>
       </div>
 
-      {/* Guess Confirmation Modal */}
-      {showGuessModal && (
+      {/* Player Selection Modal */}
+      {showPlayerSelect && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
           <Card className="w-full max-w-md m-4">
             <CardHeader>
-              <CardTitle>Confirm Your Guess</CardTitle>
+              <CardTitle>Discard for Which Player?</CardTitle>
               <CardDescription>
-                Are you sure you want to guess: <strong>{options.find(o => o.id === guessOptionId)?.text}</strong>?
+                Select which player this option should be marked as discarded for
               </CardDescription>
             </CardHeader>
-            <CardContent className="flex gap-2">
-              <Button onClick={confirmGuess} className="flex-1">
-                Yes, I'm Sure
-              </Button>
-              <Button onClick={() => setShowGuessModal(false)} variant="outline" className="flex-1">
+            <CardContent className="space-y-2">
+              {players.map((player) => (
+                <Button
+                  key={player.id}
+                  onClick={() => handleDiscardForPlayer(showPlayerSelect, player.id)}
+                  variant="outline"
+                  className="w-full justify-start"
+                >
+                  <User className="w-4 h-4 mr-2" />
+                  {player.username}
+                  {player.id === playerId && ' (You)'}
+                </Button>
+              ))}
+              <Button
+                onClick={() => setShowPlayerSelect(null)}
+                variant="ghost"
+                className="w-full mt-2"
+              >
                 Cancel
               </Button>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/* Multi-Step Guess Confirmation Modal */}
+      {showGuessModal && guessOptionId && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
+          <Card className="w-full max-w-md m-4">
+            <CardHeader>
+              <CardTitle>
+                Confirm Your Guess {guessStep > 1 && `(Step ${guessStep}/3)`}
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              {guessStep === 1 && (
+                <>
+                  <div className="p-4 bg-yellow-500/10 border border-yellow-500 rounded-lg">
+                    <p className="font-medium mb-2">You are about to guess:</p>
+                    <p className="text-lg">{options.find(o => o.id === guessOptionId)?.text}</p>
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    This is your first confirmation. You'll need to confirm 2 more times to finalize your guess.
+                  </p>
+                  <Button onClick={handleNextGuessStep} className="w-full">
+                    Continue to Step 2
+                  </Button>
+                </>
+              )}
+              
+              {guessStep === 2 && (
+                <>
+                  <div className="p-4 bg-orange-500/10 border border-orange-500 rounded-lg">
+                    <p className="font-medium mb-2">Second Confirmation:</p>
+                    <p className="text-lg">{options.find(o => o.id === guessOptionId)?.text}</p>
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    Are you sure this is your final guess? One more confirmation required.
+                  </p>
+                  <div className="flex gap-2">
+                    <Button onClick={handleNextGuessStep} className="flex-1">
+                      Continue to Final Step
+                    </Button>
+                    <Button 
+                      onClick={() => {
+                        setShowGuessModal(false);
+                        setGuessStep(1);
+                      }} 
+                      variant="outline" 
+                      className="flex-1"
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                </>
+              )}
+              
+              {guessStep === 3 && (
+                <>
+                  <div className="p-4 bg-red-500/10 border border-red-500 rounded-lg">
+                    <p className="font-medium mb-2">FINAL CONFIRMATION:</p>
+                    <p className="text-lg font-bold">{options.find(o => o.id === guessOptionId)?.text}</p>
+                  </div>
+                  <p className="text-sm text-muted-foreground">
+                    This is your final chance to change your mind. Once confirmed, you cannot undo this guess.
+                  </p>
+                  <div className="flex gap-2">
+                    <Button onClick={confirmGuess} variant="destructive" className="flex-1">
+                      Yes, Finalize My Guess
+                    </Button>
+                    <Button 
+                      onClick={() => {
+                        setShowGuessModal(false);
+                        setGuessStep(1);
+                      }} 
+                      variant="outline" 
+                      className="flex-1"
+                    >
+                      Cancel
+                    </Button>
+                  </div>
+                </>
+              )}
             </CardContent>
           </Card>
         </div>

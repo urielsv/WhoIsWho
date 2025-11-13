@@ -8,10 +8,14 @@ export interface Player {
   notes?: string;
 }
 
+export type OptionState = 'normal' | 'discarded' | 'possibleGuess';
+
 export interface GameOption {
   id: string;
   text: string;
   eliminated: boolean;
+  state?: OptionState; // Per-player state: normal, discarded (gray), possibleGuess
+  discardedForPlayerId?: string; // Which player this is discarded for
 }
 
 export interface GameRoom {
