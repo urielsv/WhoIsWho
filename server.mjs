@@ -245,13 +245,24 @@ app.prepare().then(() => {
       if (room.currentTurnPlayerId !== socket.id) return;
       if (room.gamePhase !== 'question') return;
       
-      room.gamePhase = 'elimination';
-      
+      // After question, immediately move to next player (ping-pong style)
+      // No elimination phase - players can discard anytime
       const player = room.players.find(p => p.id === socket.id);
       io.to(normalizedRoomId).emit('questionAsked', { 
         playerId: socket.id,
         playerName: player?.username || 'Unknown'
       });
+      
+      // Auto-advance to next player for faster gameplay
+      const activePlayers = room.players.filter(p => !p.hasFinished);
+      if (activePlayers.length >= 2) {
+        const pingPongPlayers = activePlayers.slice(0, 2);
+        const currentIndex = pingPongPlayers.findIndex(p => p.id === room.currentTurnPlayerId);
+        const nextIndex = (currentIndex + 1) % pingPongPlayers.length;
+        room.currentTurnPlayerId = pingPongPlayers[nextIndex].id;
+      }
+      
+      room.gamePhase = 'question'; // Stay in question phase for continuous flow
       
       io.to(normalizedRoomId).emit('roomUpdate', {
         players: room.players,
@@ -275,19 +286,20 @@ app.prepare().then(() => {
       if (!playerOptions) return;
       
       const option = playerOptions.find(o => o.id === optionId);
-      if (!option) return;
+      if (!option || option.eliminated) return;
       
-      // Cycle through states: normal -> discarded -> possibleGuess -> normal
+      // Simplified cycle: normal -> discarded -> normal (removed possibleGuess from cycle)
+      // Possible guess is only set when explicitly marking for guess
       if (!option.state || option.state === 'normal') {
         // First click: mark as discarded for target player
         option.state = 'discarded';
         option.discardedForPlayerId = targetPlayerId || socket.id;
       } else if (option.state === 'discarded') {
-        // Second click: mark as possible guess
-        option.state = 'possibleGuess';
+        // Second click: back to normal (easy undo)
+        option.state = 'normal';
         option.discardedForPlayerId = null;
       } else if (option.state === 'possibleGuess') {
-        // Third click: back to normal
+        // If already possible guess, cycle back to normal
         option.state = 'normal';
         option.discardedForPlayerId = null;
       }
@@ -296,24 +308,72 @@ app.prepare().then(() => {
       io.to(socket.id).emit('playerOptions', { options: playerOptions });
     });
     
+    socket.on('markAsPossibleGuess', ({ roomId, optionId }) => {
+      const normalizedRoomId = normalizeRoomId(roomId);
+      const room = rooms.get(normalizedRoomId);
+      if (!room) return;
+      
+      const player = room.players.find(p => p.id === socket.id);
+      if (!player || player.hasFinished) return;
+      
+      const playerOptions = room.playerOptions.get(socket.id);
+      if (!playerOptions) return;
+      
+      const option = playerOptions.find(o => o.id === optionId);
+      if (!option || option.eliminated) return;
+      
+      // Explicitly mark as possible guess (separate from cycle)
+      option.state = 'possibleGuess';
+      option.discardedForPlayerId = null;
+      
+      io.to(socket.id).emit('playerOptions', { options: playerOptions });
+    });
+    
+    socket.on('bulkDiscard', ({ roomId, optionIds, targetPlayerId }) => {
+      const normalizedRoomId = normalizeRoomId(roomId);
+      const room = rooms.get(normalizedRoomId);
+      if (!room) return;
+      
+      const player = room.players.find(p => p.id === socket.id);
+      if (!player || player.hasFinished) return;
+      
+      const playerOptions = room.playerOptions.get(socket.id);
+      if (!playerOptions) return;
+      
+      // Bulk discard multiple options at once
+      for (const optionId of optionIds) {
+        const option = playerOptions.find(o => o.id === optionId);
+        if (option && !option.eliminated) {
+          option.state = 'discarded';
+          option.discardedForPlayerId = targetPlayerId || socket.id;
+        }
+      }
+      
+      io.to(socket.id).emit('playerOptions', { options: playerOptions });
+    });
+    
     socket.on('nextTurn', ({ roomId }) => {
       const normalizedRoomId = normalizeRoomId(roomId);
       const room = rooms.get(normalizedRoomId);
       if (!room) return;
       
-      // Find next player who hasn't finished
-      const currentIndex = room.players.findIndex(p => p.id === room.currentTurnPlayerId);
-      let nextIndex = (currentIndex + 1) % room.players.length;
-      let attempts = 0;
-      
-      // Skip finished players
-      while (room.players[nextIndex].hasFinished && attempts < room.players.length) {
-        nextIndex = (nextIndex + 1) % room.players.length;
-        attempts++;
+      // Ping-pong style: alternate between two active players for faster gameplay
+      const activePlayers = room.players.filter(p => !p.hasFinished);
+      if (activePlayers.length < 2) {
+        // If only one player left, just cycle to them
+        if (activePlayers.length === 1) {
+          room.currentTurnPlayerId = activePlayers[0].id;
+          room.gamePhase = 'question';
+        }
+      } else {
+        // Find current player index in active players
+        const currentActiveIndex = activePlayers.findIndex(p => p.id === room.currentTurnPlayerId);
+        // Ping-pong: alternate between first two active players
+        const pingPongPlayers = activePlayers.slice(0, 2);
+        const nextIndex = (currentActiveIndex + 1) % pingPongPlayers.length;
+        room.currentTurnPlayerId = pingPongPlayers[nextIndex].id;
+        room.gamePhase = 'question';
       }
-      
-      room.currentTurnPlayerId = room.players[nextIndex].id;
-      room.gamePhase = 'question';
       
       io.to(normalizedRoomId).emit('turnChanged', { 
         currentTurnPlayerId: room.currentTurnPlayerId 
@@ -414,6 +474,31 @@ app.prepare().then(() => {
         player.notes = notes || '';
         // Notes are private, no need to broadcast
       }
+    });
+    
+    socket.on('getPlayerBoard', ({ roomId, targetPlayerId }) => {
+      const normalizedRoomId = normalizeRoomId(roomId);
+      const room = rooms.get(normalizedRoomId);
+      if (!room) return;
+      
+      // Get the requesting player's options, filtered by target player
+      const playerOptions = room.playerOptions.get(socket.id);
+      if (!playerOptions) return;
+      
+      // Filter options discarded for the target player, or show all if viewing own board
+      const filteredOptions = targetPlayerId === socket.id 
+        ? playerOptions 
+        : playerOptions.map(opt => ({
+            ...opt,
+            // Only show if discarded for target player, or if it's a possible guess
+            visible: opt.discardedForPlayerId === targetPlayerId || opt.state === 'possibleGuess' || !opt.state || opt.state === 'normal'
+          })).filter(opt => opt.visible !== false);
+      
+      // Send filtered view
+      io.to(socket.id).emit('playerBoardView', { 
+        targetPlayerId,
+        options: filteredOptions 
+      });
     });
     
     function checkGameEnd(room, normalizedRoomId, io) {

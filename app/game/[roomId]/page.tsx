@@ -8,7 +8,7 @@ import { Badge } from '@/components/ui/badge';
 import { Textarea } from '@/components/ui/textarea';
 import { useSocket } from '@/lib/socket';
 import { useGameStore } from '@/lib/store';
-import { Trophy, MessageSquare, ArrowRight, CheckCircle, XCircle, FileText, HelpCircle, User } from 'lucide-react';
+import { Trophy, MessageSquare, ArrowRight, CheckCircle, XCircle, HelpCircle, User, ChevronLeft, ChevronRight, Star, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { OptionState } from '@/types/game';
 
@@ -38,9 +38,12 @@ export default function GamePage() {
 
   const [showGuessModal, setShowGuessModal] = useState(false);
   const [guessOptionId, setGuessOptionId] = useState<string | null>(null);
-  const [guessStep, setGuessStep] = useState(1); // Multi-step confirmation
-  const [showPlayerSelect, setShowPlayerSelect] = useState<string | null>(null); // optionId for player selection
+  const [guessStep, setGuessStep] = useState(1);
+  const [showPlayerSelect, setShowPlayerSelect] = useState<string | null>(null);
   const [showHelp, setShowHelp] = useState(false);
+  const [selectedPlayerView, setSelectedPlayerView] = useState<string | null>(null); // Which player's board to view
+  const [bulkSelectMode, setBulkSelectMode] = useState(false);
+  const [bulkSelectedOptions, setBulkSelectedOptions] = useState<Set<string>>(new Set());
 
   const isMyTurn = currentTurnPlayerId === playerId;
   const currentPlayer = players.find(p => p.id === currentTurnPlayerId);
@@ -48,11 +51,20 @@ export default function GamePage() {
   const myOption = options.find(o => o.id === mySecretOption);
   const remainingOptions = options.filter(o => !o.eliminated);
   const hasFinished = myPlayer?.hasFinished || false;
+  
+  // Active players for ping-pong
+  const activePlayers = players.filter(p => !p.hasFinished);
+  const pingPongPlayers = activePlayers.slice(0, 2);
 
   useEffect(() => {
     if (!socket || !playerId) {
       router.push('/');
       return;
+    }
+
+    // Set default view to current player
+    if (!selectedPlayerView && playerId) {
+      setSelectedPlayerView(playerId);
     }
 
     const handleRoomUpdate = (data: any) => {
@@ -66,13 +78,19 @@ export default function GamePage() {
       setOptions(data.options);
     };
 
+    const handlePlayerBoardView = (data: any) => {
+      // Update options when viewing a different player's board
+      if (data.targetPlayerId === selectedPlayerView) {
+        setOptions(data.options);
+      }
+    };
+
     const handleQuestionAsked = (data: any) => {
       setLastQuestion(`${data.playerName} asked a question`);
     };
 
     const handleTurnChanged = (data: any) => {
       setCurrentTurnPlayerId(data.currentTurnPlayerId);
-      setLastQuestion(null);
     };
 
     const handlePlayerGuessed = (data: any) => {
@@ -89,6 +107,7 @@ export default function GamePage() {
 
     socket.on('roomUpdate', handleRoomUpdate);
     socket.on('playerOptions', handlePlayerOptions);
+    socket.on('playerBoardView', handlePlayerBoardView);
     socket.on('questionAsked', handleQuestionAsked);
     socket.on('turnChanged', handleTurnChanged);
     socket.on('playerGuessed', handlePlayerGuessed);
@@ -98,13 +117,21 @@ export default function GamePage() {
     return () => {
       socket.off('roomUpdate', handleRoomUpdate);
       socket.off('playerOptions', handlePlayerOptions);
+      socket.off('playerBoardView', handlePlayerBoardView);
       socket.off('questionAsked', handleQuestionAsked);
       socket.off('turnChanged', handleTurnChanged);
       socket.off('playerGuessed', handlePlayerGuessed);
       socket.off('playerGaveUp', handlePlayerGaveUp);
       socket.off('gameFinished', handleGameFinished);
     };
-  }, [socket, playerId, roomId, router, setPlayers, setOptions, setGamePhase, setCurrentTurnPlayerId, setLastQuestion]);
+  }, [socket, playerId, roomId, router, setPlayers, setOptions, setGamePhase, setCurrentTurnPlayerId, setLastQuestion, selectedPlayerView]);
+
+  // Request board view when selected player changes
+  useEffect(() => {
+    if (socket && selectedPlayerView) {
+      socket.emit('getPlayerBoard', { roomId, targetPlayerId: selectedPlayerView });
+    }
+  }, [socket, roomId, selectedPlayerView]);
 
   const handleAskQuestion = () => {
     socket?.emit('askQuestion', { roomId });
@@ -115,6 +142,18 @@ export default function GamePage() {
     
     const option = options.find(o => o.id === optionId);
     if (!option || option.eliminated) return;
+
+    // Bulk select mode
+    if (bulkSelectMode) {
+      const newSelected = new Set(bulkSelectedOptions);
+      if (newSelected.has(optionId)) {
+        newSelected.delete(optionId);
+      } else {
+        newSelected.add(optionId);
+      }
+      setBulkSelectedOptions(newSelected);
+      return;
+    }
 
     // If option is in 'possibleGuess' state, show guess modal
     if (option.state === 'possibleGuess') {
@@ -130,12 +169,14 @@ export default function GamePage() {
       return;
     }
 
-    // Otherwise, cycle the state (discarded -> possibleGuess -> normal)
-    socket?.emit('cycleOptionState', { 
-      roomId, 
-      optionId,
-      targetPlayerId: option.discardedForPlayerId || playerId
-    });
+    // If discarded, cycle back to normal (easy undo)
+    if (option.state === 'discarded') {
+      socket?.emit('cycleOptionState', { 
+        roomId, 
+        optionId,
+        targetPlayerId: option.discardedForPlayerId || playerId
+      });
+    }
   };
 
   const handleDiscardForPlayer = (optionId: string, targetPlayerId: string) => {
@@ -145,6 +186,21 @@ export default function GamePage() {
       targetPlayerId
     });
     setShowPlayerSelect(null);
+  };
+
+  const handleBulkDiscard = (targetPlayerId: string) => {
+    if (bulkSelectedOptions.size === 0) return;
+    socket?.emit('bulkDiscard', {
+      roomId,
+      optionIds: Array.from(bulkSelectedOptions),
+      targetPlayerId
+    });
+    setBulkSelectedOptions(new Set());
+    setBulkSelectMode(false);
+  };
+
+  const handleMarkAsPossibleGuess = (optionId: string) => {
+    socket?.emit('markAsPossibleGuess', { roomId, optionId });
   };
 
   const handleNextGuessStep = () => {
@@ -166,10 +222,6 @@ export default function GamePage() {
       setGuessOptionId(null);
       setGuessStep(1);
     }
-  };
-
-  const handleNextTurn = () => {
-    socket?.emit('nextTurn', { roomId });
   };
 
   const handleGiveUp = () => {
@@ -207,8 +259,6 @@ export default function GamePage() {
   };
 
   if (gamePhase === 'finished') {
-    const winners = players.filter(p => p.guessedOptionId);
-
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800 flex items-center justify-center p-4">
         <Card className="w-full max-w-md text-center">
@@ -217,9 +267,7 @@ export default function GamePage() {
               <Trophy className="w-8 h-8 text-white" />
             </div>
             <CardTitle className="text-3xl">Game Over!</CardTitle>
-            <CardDescription>
-              All players have finished
-            </CardDescription>
+            <CardDescription>All players have finished</CardDescription>
           </CardHeader>
           <CardContent className="space-y-4">
             <div className="space-y-2">
@@ -247,8 +295,8 @@ export default function GamePage() {
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800 p-4">
-      <div className="max-w-6xl mx-auto py-8">
-        <div className="text-center mb-8">
+      <div className="max-w-7xl mx-auto py-8">
+        <div className="text-center mb-6">
           <div className="flex items-center justify-center gap-2 mb-2">
             <h1 className="text-4xl font-bold text-gray-900 dark:text-white">
               {roomName}
@@ -262,9 +310,16 @@ export default function GamePage() {
               <HelpCircle className="w-4 h-4" />
             </Button>
           </div>
-          <Badge variant="secondary" className="text-lg px-4 py-1">
-            {gamePhase === 'question' ? 'Question Phase' : 'Elimination Phase'}
-          </Badge>
+          <div className="flex items-center justify-center gap-4">
+            <Badge variant="secondary" className="text-lg px-4 py-1">
+              {gamePhase === 'question' ? 'Question Phase' : 'Elimination Phase'}
+            </Badge>
+            {pingPongPlayers.length >= 2 && (
+              <Badge variant="outline" className="text-sm">
+                Ping-Pong: {pingPongPlayers.map(p => p.username).join(' ↔ ')}
+              </Badge>
+            )}
+          </div>
         </div>
 
         {showHelp && (
@@ -272,28 +327,34 @@ export default function GamePage() {
             <CardHeader>
               <CardTitle className="text-lg flex items-center gap-2">
                 <HelpCircle className="w-5 h-5" />
-                How to Play
+                How to Play - Fast Mode
               </CardTitle>
             </CardHeader>
             <CardContent className="space-y-3 text-sm">
               <div>
-                <strong className="text-blue-900 dark:text-blue-100">Click Options to Cycle States:</strong>
-                <ul className="list-disc list-inside mt-1 space-y-1 text-muted-foreground">
-                  <li><strong>1st Click:</strong> Mark as discarded (gray) - choose which player</li>
-                  <li><strong>2nd Click:</strong> Mark as possible guess (green highlight)</li>
-                  <li><strong>3rd Click:</strong> Back to normal</li>
-                </ul>
-              </div>
-              <div>
-                <strong className="text-blue-900 dark:text-blue-100">Making a Guess:</strong>
+                <strong className="text-blue-900 dark:text-blue-100">Ping-Pong Style:</strong>
                 <p className="text-muted-foreground mt-1">
-                  Click an option marked as "Possible Guess" to start the guess process. You'll need to confirm 3 times to finalize your guess.
+                  Two players alternate asking questions quickly. No waiting for elimination phase - discard options anytime!
                 </p>
               </div>
               <div>
-                <strong className="text-blue-900 dark:text-blue-100">Discarding Options:</strong>
+                <strong className="text-blue-900 dark:text-blue-100">Quick Discard:</strong>
+                <ul className="list-disc list-inside mt-1 space-y-1 text-muted-foreground">
+                  <li><strong>Click normal option:</strong> Choose which player to discard for</li>
+                  <li><strong>Click discarded option:</strong> Undo (back to normal)</li>
+                  <li><strong>Right-click or long-press:</strong> Mark as possible guess</li>
+                </ul>
+              </div>
+              <div>
+                <strong className="text-blue-900 dark:text-blue-100">Bulk Operations:</strong>
                 <p className="text-muted-foreground mt-1">
-                  When you click a normal option, you'll choose which player it's discarded for. This helps you track who might have which option.
+                  Enable bulk mode to select multiple options, then discard them all at once for faster gameplay.
+                </p>
+              </div>
+              <div>
+                <strong className="text-blue-900 dark:text-blue-100">Player Boards:</strong>
+                <p className="text-muted-foreground mt-1">
+                  Use the carousel to view different player boards and see what each player has discarded.
                 </p>
               </div>
             </CardContent>
@@ -307,9 +368,10 @@ export default function GamePage() {
           </div>
         )}
 
-        <div className="grid lg:grid-cols-3 gap-6">
-          <div className="lg:col-span-2 space-y-6">
-            {/* Current Turn Card */}
+        <div className="grid lg:grid-cols-4 gap-6">
+          {/* Main Game Area */}
+          <div className="lg:col-span-3 space-y-6">
+            {/* Current Turn & Question */}
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center justify-between">
@@ -325,7 +387,7 @@ export default function GamePage() {
                       I Asked My Question
                     </Button>
                     <p className="text-sm text-muted-foreground text-center">
-                      Ask your question out loud, then click this button when done
+                      Ask your question out loud, then click. Turn automatically passes to next player!
                     </p>
                   </div>
                 )}
@@ -336,87 +398,178 @@ export default function GamePage() {
                   </div>
                 )}
 
-                {gamePhase === 'elimination' && (
-                  <div className="space-y-4">
-                    {lastQuestion && (
-                      <div className="p-4 bg-primary/10 rounded-lg border border-primary/20">
-                        <p className="text-lg font-medium">{lastQuestion}</p>
-                      </div>
-                    )}
-                    
-                    <Button 
-                      onClick={handleNextTurn}
-                      variant="outline"
-                      className="w-full"
-                    >
-                      Next Turn
-                      <ArrowRight className="w-4 h-4 ml-2" />
-                    </Button>
+                {lastQuestion && (
+                  <div className="p-4 bg-primary/10 rounded-lg border border-primary/20">
+                    <p className="text-lg font-medium">{lastQuestion}</p>
+                    <p className="text-sm text-muted-foreground mt-1">
+                      You can discard options anytime - no need to wait!
+                    </p>
                   </div>
                 )}
               </CardContent>
             </Card>
 
-            {/* Options Grid */}
+            {/* Player Board Carousel */}
             <Card>
               <CardHeader>
-                <CardTitle>
-                  Your Options ({remainingOptions.length} remaining)
-                </CardTitle>
-                <CardDescription>
-                  Click options to cycle: Normal → Discarded (gray) → Possible Guess (green) → Normal
-                </CardDescription>
-              </CardHeader>
-              <CardContent>
-                <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-2">
-                  {options.map((option) => {
-                    const stateLabel = getOptionStateLabel(option.state, option.discardedForPlayerId);
-                    return (
-                      <button
-                        key={option.id}
-                        onClick={() => handleOptionClick(option.id)}
-                        disabled={option.eliminated || hasFinished}
-                        className={cn(
-                          "p-3 rounded-lg border-2 text-left transition-all relative",
-                          option.eliminated && "opacity-30 line-through bg-gray-100 dark:bg-gray-800 cursor-not-allowed",
-                          !option.eliminated && !hasFinished && "hover:border-primary cursor-pointer",
-                          getOptionStateColor(option.state),
-                          option.id === mySecretOption && !option.eliminated && "ring-2 ring-yellow-500"
-                        )}
-                      >
-                        <div className="font-medium text-sm break-words">
-                          {option.text}
-                        </div>
-                        {option.id === mySecretOption && !option.eliminated && (
-                          <Badge variant="secondary" className="mt-1 text-xs">
-                            Your Secret
-                          </Badge>
-                        )}
-                        {stateLabel && (
-                          <Badge 
-                            variant={option.state === 'possibleGuess' ? 'default' : 'outline'} 
-                            className="mt-1 text-xs"
-                          >
-                            {stateLabel}
-                          </Badge>
-                        )}
-                      </button>
-                    );
-                  })}
-                </div>
-                
-                {!hasFinished && (
-                  <div className="mt-4">
+                <div className="flex items-center justify-between">
+                  <div>
+                    <CardTitle>Player Boards</CardTitle>
+                    <CardDescription>
+                      View and manage options for different players
+                    </CardDescription>
+                  </div>
+                  <div className="flex gap-2">
                     <Button
-                      onClick={handleGiveUp}
-                      variant="outline"
-                      className="w-full"
+                      variant={bulkSelectMode ? "default" : "outline"}
+                      size="sm"
+                      onClick={() => {
+                        setBulkSelectMode(!bulkSelectMode);
+                        if (bulkSelectMode) {
+                          setBulkSelectedOptions(new Set());
+                        }
+                      }}
                     >
-                      <XCircle className="w-4 h-4 mr-2" />
-                      Give Up
+                      {bulkSelectMode ? 'Cancel Bulk' : 'Bulk Select'}
                     </Button>
                   </div>
-                )}
+                </div>
+              </CardHeader>
+              <CardContent>
+                {/* Player Selector Carousel */}
+                <div className="flex items-center gap-2 mb-4 overflow-x-auto pb-2">
+                  {players.map((player) => (
+                    <Button
+                      key={player.id}
+                      variant={selectedPlayerView === player.id ? "default" : "outline"}
+                      size="sm"
+                      onClick={() => setSelectedPlayerView(player.id)}
+                      className={cn(
+                        "whitespace-nowrap",
+                        player.id === playerId && "ring-2 ring-yellow-500"
+                      )}
+                    >
+                      <User className="w-4 h-4 mr-1" />
+                      {player.username}
+                      {player.id === playerId && ' (You)'}
+                      {player.hasFinished && (
+                        <CheckCircle className="w-3 h-3 ml-1" />
+                      )}
+                    </Button>
+                  ))}
+                </div>
+
+                {/* Options Grid for Selected Player */}
+                <div className="space-y-4">
+                  <div className="p-2 bg-secondary rounded text-sm text-center">
+                    Viewing board for: <strong>{players.find(p => p.id === selectedPlayerView)?.username}</strong>
+                    {selectedPlayerView === playerId && ' (Your Board)'}
+                  </div>
+                  <div className="grid sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
+                    {options.map((option) => {
+                      const stateLabel = getOptionStateLabel(option.state, option.discardedForPlayerId);
+                      const isBulkSelected = bulkSelectedOptions.has(option.id);
+                      const isViewingMyBoard = selectedPlayerView === playerId;
+                      const isDiscardedForThisPlayer = option.discardedForPlayerId === selectedPlayerView;
+                      
+                      // Show all options when viewing own board, or show options relevant to selected player
+                      const shouldShow = isViewingMyBoard || isDiscardedForThisPlayer || !option.state || option.state === 'normal' || option.state === 'possibleGuess';
+                      
+                      if (!shouldShow) return null;
+                      
+                      return (
+                        <button
+                          key={option.id}
+                          onClick={() => handleOptionClick(option.id)}
+                          onContextMenu={(e) => {
+                            e.preventDefault();
+                            if (!hasFinished && !option.eliminated) {
+                              handleMarkAsPossibleGuess(option.id);
+                            }
+                          }}
+                          disabled={option.eliminated || hasFinished}
+                          className={cn(
+                            "p-3 rounded-lg border-2 text-left transition-all relative",
+                            option.eliminated && "opacity-30 line-through bg-gray-100 dark:bg-gray-800 cursor-not-allowed",
+                            !option.eliminated && !hasFinished && "hover:border-primary cursor-pointer",
+                            getOptionStateColor(option.state),
+                            option.id === mySecretOption && !option.eliminated && isViewingMyBoard && "ring-2 ring-yellow-500",
+                            isBulkSelected && "ring-4 ring-blue-500 border-blue-500",
+                            isDiscardedForThisPlayer && !isViewingMyBoard && "border-blue-300 dark:border-blue-700"
+                          )}
+                        >
+                          <div className="font-medium text-sm break-words">
+                            {option.text}
+                          </div>
+                          {option.id === mySecretOption && !option.eliminated && isViewingMyBoard && (
+                            <Badge variant="secondary" className="mt-1 text-xs">
+                              Your Secret
+                            </Badge>
+                          )}
+                          {stateLabel && (
+                            <Badge 
+                              variant={option.state === 'possibleGuess' ? 'default' : 'outline'} 
+                              className="mt-1 text-xs"
+                            >
+                              {stateLabel}
+                            </Badge>
+                          )}
+                          {isBulkSelected && (
+                            <div className="absolute top-1 right-1">
+                              <div className="w-4 h-4 bg-blue-500 rounded-full flex items-center justify-center">
+                                <CheckCircle className="w-3 h-3 text-white" />
+                              </div>
+                            </div>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Bulk Actions */}
+                  {bulkSelectMode && bulkSelectedOptions.size > 0 && (
+                    <Card className="bg-blue-50 dark:bg-blue-950 border-blue-200 dark:border-blue-800">
+                      <CardContent className="pt-4">
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <p className="font-medium">{bulkSelectedOptions.size} options selected</p>
+                            <p className="text-sm text-muted-foreground">Choose a player to discard for:</p>
+                          </div>
+                          <div className="flex gap-2">
+                            {players.map((player) => (
+                              <Button
+                                key={player.id}
+                                onClick={() => handleBulkDiscard(player.id)}
+                                size="sm"
+                                variant="outline"
+                              >
+                                <User className="w-3 h-3 mr-1" />
+                                {player.username}
+                              </Button>
+                            ))}
+                          </div>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  )}
+
+                  {/* Quick Actions */}
+                  {!hasFinished && !bulkSelectMode && (
+                    <div className="flex gap-2 flex-wrap">
+                      <Button
+                        onClick={handleGiveUp}
+                        variant="outline"
+                        size="sm"
+                      >
+                        <XCircle className="w-4 h-4 mr-2" />
+                        Give Up
+                      </Button>
+                      <p className="text-xs text-muted-foreground self-center">
+                        💡 Tip: Right-click options to mark as possible guess
+                      </p>
+                    </div>
+                  )}
+                </div>
               </CardContent>
             </Card>
           </div>
@@ -472,13 +625,17 @@ export default function GamePage() {
                       className={cn(
                         "p-2 rounded text-sm flex items-center justify-between",
                         player.id === currentTurnPlayerId ? "bg-primary text-primary-foreground" : "bg-secondary",
-                        player.hasFinished && "opacity-60"
+                        player.hasFinished && "opacity-60",
+                        pingPongPlayers.some(p => p.id === player.id) && "ring-2 ring-blue-500"
                       )}
                     >
                       <div className="flex items-center gap-2">
                         <User className="w-4 h-4" />
                         {player.username}
                         {player.id === currentTurnPlayerId && " (Current)"}
+                        {pingPongPlayers.some(p => p.id === player.id) && (
+                          <Badge variant="outline" className="text-xs">Ping-Pong</Badge>
+                        )}
                       </div>
                       {player.hasFinished && (
                         <Badge variant="outline" className="text-xs">
