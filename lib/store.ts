@@ -14,8 +14,10 @@ interface GameState {
   currentTurnPlayerId: string | null;
   mySecretOption: string | null;
   lastQuestion: string | null;
+  myNotes: string;
   
   setRoomInfo: (roomId: string, roomName: string, playerId: string, username: string, isAdmin: boolean) => void;
+  setRoomName: (roomName: string) => void;
   setPlayers: (players: Player[]) => void;
   setOptions: (options: GameOption[]) => void;
   setGameStarted: (started: boolean) => void;
@@ -23,6 +25,7 @@ interface GameState {
   setCurrentTurnPlayerId: (playerId: string | null) => void;
   setMySecretOption: (optionId: string | null) => void;
   setLastQuestion: (question: string | null) => void;
+  setMyNotes: (notes: string) => void;
   reset: () => void;
 }
 
@@ -39,9 +42,11 @@ export const useGameStore = create<GameState>((set) => ({
   currentTurnPlayerId: null,
   mySecretOption: null,
   lastQuestion: null,
+  myNotes: '',
   
   setRoomInfo: (roomId, roomName, playerId, username, isAdmin) => 
     set({ roomId, roomName, playerId, username, isAdmin }),
+  setRoomName: (roomName) => set({ roomName }),
   setPlayers: (players) => set({ players }),
   setOptions: (options) => set({ options }),
   setGameStarted: (started) => set({ gameStarted: started }),
@@ -49,6 +54,7 @@ export const useGameStore = create<GameState>((set) => ({
   setCurrentTurnPlayerId: (playerId) => set({ currentTurnPlayerId: playerId }),
   setMySecretOption: (optionId) => set({ mySecretOption: optionId }),
   setLastQuestion: (question) => set({ lastQuestion: question }),
+  setMyNotes: (notes) => set({ myNotes: notes }),
   reset: () => set({
     roomId: null,
     roomName: null,
@@ -62,6 +68,7 @@ export const useGameStore = create<GameState>((set) => ({
     currentTurnPlayerId: null,
     mySecretOption: null,
     lastQuestion: null,
+    myNotes: '',
   }),
 }));
 

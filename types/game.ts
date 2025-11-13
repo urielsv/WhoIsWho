@@ -3,6 +3,9 @@ export interface Player {
   username: string;
   isAdmin: boolean;
   isReady: boolean;
+  hasFinished?: boolean;
+  guessedOptionId?: string | null;
+  notes?: string;
 }
 
 export interface GameOption {

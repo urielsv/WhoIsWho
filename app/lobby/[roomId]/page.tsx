@@ -5,9 +5,11 @@ import { useRouter, useParams } from 'next/navigation';
 import { Button } from '@/components/ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { Input } from '@/components/ui/input';
+import { Label } from '@/components/ui/label';
 import { useSocket } from '@/lib/socket';
 import { useGameStore } from '@/lib/store';
-import { Users, Crown, Check, Copy, CheckCheck } from 'lucide-react';
+import { Users, Crown, Check, Copy, CheckCheck, Settings, X, Plus, Trash2, UserX, ChevronDown, ChevronUp } from 'lucide-react';
 
 export default function LobbyPage() {
   const router = useRouter();
@@ -16,12 +18,14 @@ export default function LobbyPage() {
   const roomId = params.roomId as string;
   
   const { 
+    roomId: storeRoomId,
     roomName, 
     playerId, 
     username,
     isAdmin, 
     players, 
     options,
+    setRoomName,
     setPlayers,
     setOptions,
     setGameStarted,
@@ -32,18 +36,53 @@ export default function LobbyPage() {
 
   const [copied, setCopied] = useState(false);
   const [error, setError] = useState('');
+  const [showSettings, setShowSettings] = useState(false);
+  const [newRoomName, setNewRoomName] = useState('');
+  const [newOptionText, setNewOptionText] = useState('');
 
   useEffect(() => {
-    if (!socket || !playerId) {
-      router.push('/');
+    // Wait for socket to be available and connected
+    if (!socket) {
       return;
     }
 
+    // If socket is not connected yet, wait for connection
+    if (!socket.connected) {
+      const onConnect = () => {
+        // Socket connected, continue with initialization
+      };
+      socket.on('connect', onConnect);
+      return () => socket.off('connect', onConnect);
+    }
+
+    // Wait for playerId to be set (might take a moment after navigation)
+    // Also verify that the roomId from URL matches the store
+    if (!playerId || storeRoomId !== roomId) {
+      // Give it a moment for the store to update after navigation
+      // But if it's been more than 500ms, redirect
+      const timeout = setTimeout(() => {
+        if (!playerId || storeRoomId !== roomId) {
+          router.push('/');
+        }
+      }, 500);
+      return () => clearTimeout(timeout);
+    }
+
+    // Initialize form values
+    if (roomName && !newRoomName) {
+      setNewRoomName(roomName);
+    }
+
+    // Only set up handlers once we have both socket and playerId
     const handleRoomUpdate = (data: any) => {
       setPlayers(data.players);
       setOptions(data.options);
       setGamePhase(data.gamePhase);
       setCurrentTurnPlayerId(data.currentTurnPlayerId);
+      if (data.roomName) {
+        setRoomName(data.roomName);
+        setNewRoomName(data.roomName);
+      }
     };
 
     const handleGameStarted = () => {
@@ -57,6 +96,14 @@ export default function LobbyPage() {
 
     const handleError = (data: any) => {
       setError(data.message);
+      setTimeout(() => setError(''), 5000);
+    };
+
+    const handleKicked = (data: any) => {
+      setError(data.message);
+      setTimeout(() => {
+        router.push('/');
+      }, 2000);
     };
 
     const handlePlayerJoined = (data: any) => {
@@ -71,6 +118,7 @@ export default function LobbyPage() {
     socket.on('gameStarted', handleGameStarted);
     socket.on('secretAssigned', handleSecretAssigned);
     socket.on('error', handleError);
+    socket.on('kicked', handleKicked);
     socket.on('playerJoined', handlePlayerJoined);
     socket.on('playerLeft', handlePlayerLeft);
 
@@ -79,10 +127,11 @@ export default function LobbyPage() {
       socket.off('gameStarted', handleGameStarted);
       socket.off('secretAssigned', handleSecretAssigned);
       socket.off('error', handleError);
+      socket.off('kicked', handleKicked);
       socket.off('playerJoined', handlePlayerJoined);
       socket.off('playerLeft', handlePlayerLeft);
     };
-  }, [socket, playerId, roomId, router, setPlayers, setOptions, setGameStarted, setGamePhase, setCurrentTurnPlayerId, setMySecretOption]);
+  }, [socket, playerId, roomId, storeRoomId, router, setPlayers, setOptions, setGameStarted, setGamePhase, setCurrentTurnPlayerId, setMySecretOption, setRoomName, roomName, newRoomName]);
 
   const handleToggleReady = () => {
     socket?.emit('toggleReady', { roomId });
@@ -91,6 +140,10 @@ export default function LobbyPage() {
   const handleStartGame = () => {
     if (players.length < 2) {
       setError('Need at least 2 players to start');
+      return;
+    }
+    if (options.length < 2) {
+      setError('Need at least 2 options to start');
       return;
     }
     socket?.emit('startGame', { roomId });
@@ -102,11 +155,76 @@ export default function LobbyPage() {
     setTimeout(() => setCopied(false), 2000);
   };
 
+  const handleUpdateRoomName = () => {
+    if (!newRoomName.trim()) {
+      setError('Room name cannot be empty');
+      return;
+    }
+    socket?.emit('updateRoomName', { roomId, roomName: newRoomName.trim() });
+  };
+
+  const handleAddOption = () => {
+    if (!newOptionText.trim()) {
+      setError('Option text cannot be empty');
+      return;
+    }
+    socket?.emit('addOption', { roomId, optionText: newOptionText.trim() });
+    setNewOptionText('');
+  };
+
+  const handleRemoveOption = (optionId: string) => {
+    socket?.emit('removeOption', { roomId, optionId });
+  };
+
+  const handleKickPlayer = (playerIdToKick: string) => {
+    if (confirm('Are you sure you want to kick this player?')) {
+      socket?.emit('kickPlayer', { roomId, playerIdToKick });
+    }
+  };
+
   const currentPlayer = players.find(p => p.id === playerId);
+
+  // Generate color for each player
+  const getPlayerColor = (playerId: string) => {
+    const colors = [
+      'bg-blue-500',
+      'bg-green-500',
+      'bg-purple-500',
+      'bg-pink-500',
+      'bg-yellow-500',
+      'bg-indigo-500',
+      'bg-red-500',
+      'bg-teal-500',
+    ];
+    const index = players.findIndex(p => p.id === playerId);
+    return colors[index % colors.length];
+  };
+
+  // Show loading state while waiting for socket connection and playerId
+  // Only show loading if socket exists but isn't connected yet, or if we're waiting for store to initialize
+  const isWaitingForSocket = socket && !socket.connected;
+  const isWaitingForStore = !playerId || storeRoomId !== roomId;
+  
+  if (!socket || isWaitingForSocket || isWaitingForStore) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800 flex items-center justify-center">
+        <div className="text-center">
+          <div className="text-lg text-gray-600 dark:text-gray-400">
+            {!socket ? 'Connecting...' : isWaitingForSocket ? 'Connecting to server...' : 'Loading lobby...'}
+          </div>
+          {isWaitingForStore && socket?.connected && (
+            <p className="text-sm text-muted-foreground mt-2">
+              If this takes too long, you may need to join the room again.
+            </p>
+          )}
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800 p-4">
-      <div className="max-w-4xl mx-auto py-8">
+      <div className="max-w-5xl mx-auto py-8">
         <div className="text-center mb-8">
           <h1 className="text-4xl font-bold text-gray-900 dark:text-white mb-2">
             {roomName}
@@ -128,7 +246,13 @@ export default function LobbyPage() {
           </p>
         </div>
 
-        <div className="grid md:grid-cols-2 gap-6">
+        {error && (
+          <div className="mb-4 p-4 bg-destructive/10 border border-destructive rounded-lg text-destructive text-center">
+            {error}
+          </div>
+        )}
+
+        <div className="grid md:grid-cols-2 gap-6 mb-6">
           <Card>
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
@@ -136,27 +260,51 @@ export default function LobbyPage() {
                 Players ({players.length})
               </CardTitle>
               <CardDescription>
-                Waiting for players to join...
+                {players.length < 2 ? 'Waiting for more players...' : 'Ready to start!'}
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="space-y-2">
+              <div className="space-y-3">
                 {players.map((player) => (
                   <div
                     key={player.id}
-                    className="flex items-center justify-between p-3 bg-secondary rounded-lg"
+                    className={`flex items-center justify-between p-3 rounded-lg ${
+                      player.id === playerId 
+                        ? 'bg-primary/10 border-2 border-primary' 
+                        : 'bg-secondary'
+                    }`}
                   >
-                    <div className="flex items-center gap-2">
-                      <span className="font-medium">{player.username}</span>
-                      {player.isAdmin && (
-                        <Crown className="w-4 h-4 text-yellow-500" />
-                      )}
+                    <div className="flex items-center gap-3">
+                      <div className={`w-10 h-10 rounded-full ${getPlayerColor(player.id)} flex items-center justify-center text-white font-bold`}>
+                        {player.username.charAt(0).toUpperCase()}
+                      </div>
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="font-medium">{player.username}</span>
+                          {player.id === playerId && (
+                            <Badge variant="outline" className="text-xs">You</Badge>
+                          )}
+                          {player.isAdmin && (
+                            <Crown className="w-4 h-4 text-yellow-500" />
+                          )}
+                        </div>
+                        {player.isReady && (
+                          <div className="text-xs text-muted-foreground flex items-center gap-1 mt-1">
+                            <Check className="w-3 h-3" />
+                            Ready
+                          </div>
+                        )}
+                      </div>
                     </div>
-                    {player.isReady && (
-                      <Badge variant="default">
-                        <Check className="w-3 h-3 mr-1" />
-                        Ready
-                      </Badge>
+                    {isAdmin && !player.isAdmin && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleKickPlayer(player.id)}
+                        className="text-destructive hover:text-destructive"
+                      >
+                        <UserX className="w-4 h-4" />
+                      </Button>
                     )}
                   </div>
                 ))}
@@ -168,7 +316,17 @@ export default function LobbyPage() {
                   variant={currentPlayer?.isReady ? "outline" : "default"}
                   className="w-full mt-4"
                 >
-                  {currentPlayer?.isReady ? 'Not Ready' : 'Ready'}
+                  {currentPlayer?.isReady ? (
+                    <>
+                      <X className="w-4 h-4 mr-2" />
+                      Not Ready
+                    </>
+                  ) : (
+                    <>
+                      <Check className="w-4 h-4 mr-2" />
+                      Ready
+                    </>
+                  )}
                 </Button>
               )}
             </CardContent>
@@ -182,33 +340,116 @@ export default function LobbyPage() {
               </CardDescription>
             </CardHeader>
             <CardContent>
-              <div className="max-h-[300px] overflow-y-auto space-y-1">
+              <div className="max-h-[300px] overflow-y-auto space-y-2 mb-4">
                 {options.map((option) => (
                   <div
                     key={option.id}
-                    className="p-2 bg-secondary rounded text-sm"
+                    className="flex items-center justify-between p-2 bg-secondary rounded text-sm"
                   >
-                    {option.text}
+                    <span>{option.text}</span>
+                    {isAdmin && (
+                      <Button
+                        variant="ghost"
+                        size="sm"
+                        onClick={() => handleRemoveOption(option.id)}
+                        className="h-6 w-6 p-0 text-destructive hover:text-destructive"
+                        disabled={options.length <= 1}
+                      >
+                        <Trash2 className="w-3 h-3" />
+                      </Button>
+                    )}
                   </div>
                 ))}
               </div>
+              {isAdmin && (
+                <div className="flex gap-2">
+                  <Input
+                    placeholder="Add new option..."
+                    value={newOptionText}
+                    onChange={(e) => setNewOptionText(e.target.value)}
+                    onKeyPress={(e) => {
+                      if (e.key === 'Enter') {
+                        handleAddOption();
+                      }
+                    }}
+                    className="flex-1"
+                  />
+                  <Button
+                    onClick={handleAddOption}
+                    size="sm"
+                    variant="outline"
+                  >
+                    <Plus className="w-4 h-4" />
+                  </Button>
+                </div>
+              )}
             </CardContent>
           </Card>
         </div>
 
-        {error && (
-          <div className="mt-4 p-4 bg-destructive/10 border border-destructive rounded-lg text-destructive text-center">
-            {error}
-          </div>
+        {isAdmin && (
+          <Card className="mb-6">
+            <CardHeader>
+              <Button
+                variant="ghost"
+                className="w-full justify-between p-0 h-auto"
+                onClick={() => setShowSettings(!showSettings)}
+              >
+                <CardTitle className="flex items-center gap-2">
+                  <Settings className="w-5 h-5" />
+                  Admin Settings
+                </CardTitle>
+                {showSettings ? (
+                  <ChevronUp className="w-5 h-5" />
+                ) : (
+                  <ChevronDown className="w-5 h-5" />
+                )}
+              </Button>
+            </CardHeader>
+            {showSettings && (
+              <CardContent className="space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor="roomName">Room Name</Label>
+                  <div className="flex gap-2">
+                    <Input
+                      id="roomName"
+                      value={newRoomName}
+                      onChange={(e) => setNewRoomName(e.target.value)}
+                      onKeyPress={(e) => {
+                        if (e.key === 'Enter') {
+                          handleUpdateRoomName();
+                        }
+                      }}
+                      className="flex-1"
+                    />
+                    <Button
+                      onClick={handleUpdateRoomName}
+                      variant="outline"
+                    >
+                      Update
+                    </Button>
+                  </div>
+                </div>
+                <div className="pt-4 border-t">
+                  <p className="text-sm text-muted-foreground mb-2">
+                    Room Code: <code className="px-2 py-1 bg-secondary rounded">{roomId}</code>
+                  </p>
+                  <p className="text-xs text-muted-foreground">
+                    Players can join using this code. You can kick players by clicking the user icon next to their name.
+                  </p>
+                </div>
+              </CardContent>
+            )}
+          </Card>
         )}
 
         {isAdmin && (
-          <div className="mt-6 flex justify-center">
+          <div className="flex justify-center">
             <Button
               onClick={handleStartGame}
               size="lg"
               className="px-8"
-              disabled={players.length < 2}
+              disabled={players.length < 2 || options.length < 2}
             >
               Start Game
             </Button>
@@ -224,4 +465,3 @@ export default function LobbyPage() {
     </div>
   );
 }
-
