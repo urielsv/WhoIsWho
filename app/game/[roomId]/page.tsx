@@ -52,9 +52,22 @@ export default function GamePage() {
   const remainingOptions = options.filter(o => !o.eliminated);
   const hasFinished = myPlayer?.hasFinished || false;
   
-  // Active players for asks/responds
+  // Active players for asks/responds - display current turn player and the next in rotation
   const activePlayers = players.filter(p => !p.hasFinished);
-  const asksRespondsPlayers = activePlayers.slice(0, 2);
+  // Get the two players who are currently in the asks/responds rotation
+  // This will be the current turn player and whoever asks/responds with them
+  const currentTurnPlayer = players.find(p => p.id === currentTurnPlayerId);
+  const currentPlayerIndex = activePlayers.findIndex(p => p.id === currentTurnPlayerId);
+  
+  let asksRespondsPlayers: typeof players = [];
+  if (activePlayers.length >= 2 && currentPlayerIndex !== -1) {
+    // Find who the current player is paired with
+    // We'll show the current player and one other active player
+    const nextIndex = (currentPlayerIndex + 1) % activePlayers.length;
+    asksRespondsPlayers = [activePlayers[currentPlayerIndex], activePlayers[nextIndex]];
+  } else {
+    asksRespondsPlayers = activePlayers.slice(0, 2);
+  }
 
   useEffect(() => {
     if (!socket || !playerId) {
@@ -105,6 +118,10 @@ export default function GamePage() {
       // Game finished
     };
 
+    const handlePairRotated = (data: any) => {
+      setLastQuestion(`New asking pair: ${data.player1} ↔ ${data.player2}`);
+    };
+
     socket.on('roomUpdate', handleRoomUpdate);
     socket.on('playerOptions', handlePlayerOptions);
     socket.on('playerBoardView', handlePlayerBoardView);
@@ -113,6 +130,7 @@ export default function GamePage() {
     socket.on('playerGuessed', handlePlayerGuessed);
     socket.on('playerGaveUp', handlePlayerGaveUp);
     socket.on('gameFinished', handleGameFinished);
+    socket.on('pairRotated', handlePairRotated);
 
     return () => {
       socket.off('roomUpdate', handleRoomUpdate);
@@ -123,6 +141,7 @@ export default function GamePage() {
       socket.off('playerGuessed', handlePlayerGuessed);
       socket.off('playerGaveUp', handlePlayerGaveUp);
       socket.off('gameFinished', handleGameFinished);
+      socket.off('pairRotated', handlePairRotated);
     };
   }, [socket, playerId, roomId, router, setPlayers, setOptions, setGamePhase, setCurrentTurnPlayerId, setLastQuestion, selectedPlayerView]);
 
@@ -308,7 +327,7 @@ export default function GamePage() {
               <div>
                 <strong className="text-blue-900 dark:text-blue-100">Asks ↔ Responds Style:</strong>
                 <p className="text-muted-foreground mt-1">
-                  Two players alternate asking and responding to questions quickly. No waiting for elimination phase - discard options anytime!
+                  Two players alternate asking and responding to questions quickly. The active pair rotates every 6 turns to give everyone a chance. No waiting for elimination phase - discard options anytime!
                 </p>
               </div>
               <div>

@@ -67,6 +67,19 @@ function assignSecrets(room) {
   return assignments;
 }
 
+function getAsksRespondsPair(room) {
+  const activePlayers = room.players.filter(p => !p.hasFinished);
+  if (activePlayers.length < 2) {
+    return activePlayers;
+  }
+  
+  // Rotate through pairs: (0,1), (1,2), (2,3), (3,0), etc.
+  const pairIndex = room.asksRespondsPairIndex % activePlayers.length;
+  const nextIndex = (pairIndex + 1) % activePlayers.length;
+  
+  return [activePlayers[pairIndex], activePlayers[nextIndex]];
+}
+
 app.prepare().then(() => {
   const httpServer = createServer(handler);
   const io = new Server(httpServer, {
@@ -105,6 +118,8 @@ app.prepare().then(() => {
         currentTurnPlayerId: null,
         gamePhase: 'lobby',
         secretAssignments: {},
+        asksRespondsPairIndex: 0, // Track which pair is currently active (rotates through players)
+        turnsSinceRotation: 0, // Track turns to rotate pair
       };
       
       rooms.set(roomId, room);
@@ -205,6 +220,8 @@ app.prepare().then(() => {
       room.gamePhase = 'question';
       room.currentTurnPlayerId = room.players[0].id;
       room.secretAssignments = assignSecrets(room);
+      room.asksRespondsPairIndex = 0; // Start with first pair
+      room.turnsSinceRotation = 0;
       
       // Initialize per-player options (each player gets a copy of all options)
       for (const player of room.players) {
@@ -229,6 +246,16 @@ app.prepare().then(() => {
       }
       
       io.to(normalizedRoomId).emit('gameStarted');
+      
+      // Notify about initial asks/responds pair
+      const initialPair = getAsksRespondsPair(room);
+      if (initialPair.length >= 2) {
+        io.to(normalizedRoomId).emit('pairRotated', {
+          player1: initialPair[0].username,
+          player2: initialPair[1].username
+        });
+      }
+      
       io.to(normalizedRoomId).emit('roomUpdate', {
         players: room.players,
         options: room.options, // Master list for reference
@@ -246,7 +273,7 @@ app.prepare().then(() => {
       if (room.currentTurnPlayerId !== socket.id) return;
       if (room.gamePhase !== 'question') return;
       
-      // After question, immediately move to next player (ping-pong style)
+      // After question, immediately move to next player (asks/responds style)
       // No elimination phase - players can discard anytime
       const player = room.players.find(p => p.id === socket.id);
       io.to(normalizedRoomId).emit('questionAsked', { 
@@ -254,13 +281,33 @@ app.prepare().then(() => {
         playerName: player?.username || 'Unknown'
       });
       
+      // Increment turn counter and check if we should rotate pair
+      room.turnsSinceRotation = (room.turnsSinceRotation || 0) + 1;
+      const TURNS_PER_PAIR = 6; // Each pair gets 6 turns before rotating
+      
+      if (room.turnsSinceRotation >= TURNS_PER_PAIR) {
+        // Rotate to next pair
+        room.asksRespondsPairIndex = (room.asksRespondsPairIndex || 0) + 1;
+        room.turnsSinceRotation = 0;
+        
+        // Notify players about pair rotation
+        const newPair = getAsksRespondsPair(room);
+        if (newPair.length >= 2) {
+          io.to(normalizedRoomId).emit('pairRotated', {
+            player1: newPair[0].username,
+            player2: newPair[1].username
+          });
+        }
+      }
+      
       // Auto-advance to next player for faster gameplay (asks/responds style)
-      const activePlayers = room.players.filter(p => !p.hasFinished);
-      if (activePlayers.length >= 2) {
-        const asksRespondsPlayers = activePlayers.slice(0, 2);
+      const asksRespondsPlayers = getAsksRespondsPair(room);
+      if (asksRespondsPlayers.length >= 2) {
         const currentIndex = asksRespondsPlayers.findIndex(p => p.id === room.currentTurnPlayerId);
         const nextIndex = (currentIndex + 1) % asksRespondsPlayers.length;
         room.currentTurnPlayerId = asksRespondsPlayers[nextIndex].id;
+      } else if (asksRespondsPlayers.length === 1) {
+        room.currentTurnPlayerId = asksRespondsPlayers[0].id;
       }
       
       room.gamePhase = 'question'; // Stay in question phase for continuous flow
@@ -381,20 +428,18 @@ app.prepare().then(() => {
       const room = rooms.get(normalizedRoomId);
       if (!room) return;
       
-      // Asks/responds style: alternate between two active players for faster gameplay
-      const activePlayers = room.players.filter(p => !p.hasFinished);
-      if (activePlayers.length < 2) {
+      // Asks/responds style: alternate between current pair of active players
+      const asksRespondsPlayers = getAsksRespondsPair(room);
+      if (asksRespondsPlayers.length < 2) {
         // If only one player left, just cycle to them
-        if (activePlayers.length === 1) {
-          room.currentTurnPlayerId = activePlayers[0].id;
+        if (asksRespondsPlayers.length === 1) {
+          room.currentTurnPlayerId = asksRespondsPlayers[0].id;
           room.gamePhase = 'question';
         }
       } else {
-        // Find current player index in active players
-        const currentActiveIndex = activePlayers.findIndex(p => p.id === room.currentTurnPlayerId);
-        // Asks/responds: alternate between first two active players
-        const asksRespondsPlayers = activePlayers.slice(0, 2);
-        const nextIndex = (currentActiveIndex + 1) % asksRespondsPlayers.length;
+        // Alternate between the current asks/responds pair
+        const currentIndex = asksRespondsPlayers.findIndex(p => p.id === room.currentTurnPlayerId);
+        const nextIndex = (currentIndex + 1) % asksRespondsPlayers.length;
         room.currentTurnPlayerId = asksRespondsPlayers[nextIndex].id;
         room.gamePhase = 'question';
       }
