@@ -40,6 +40,7 @@ export default function GamePage() {
 
   const [showGuessModal, setShowGuessModal] = useState(false);
   const [guessTargetPlayerId, setGuessTargetPlayerId] = useState<string | null>(null); // Which player we're guessing for
+  const [showMyGuessModal, setShowMyGuessModal] = useState(false); // Modal for guessing own secret
   const [showHelp, setShowHelp] = useState(false);
   const [selectedPlayerView, setSelectedPlayerView] = useState<string | null>(null); // Which player's board to view
   const [bulkSelectMode, setBulkSelectMode] = useState(false);
@@ -229,6 +230,18 @@ export default function GamePage() {
     
     setShowGuessModal(false);
     setGuessTargetPlayerId(null);
+  };
+
+  const handleGuessMyOwnSecret = (optionId: string) => {
+    // This is the final guess for your own secret - marks you as finished
+    if (confirm('Are you sure this is your secret? This will mark you as finished.')) {
+      socket?.emit('makeGuess', { 
+        roomId, 
+        optionId,
+        confirmation: 'CONFIRMED'
+      });
+      setShowMyGuessModal(false);
+    }
   };
 
   const handleGiveUp = () => {
@@ -732,8 +745,13 @@ export default function GamePage() {
             <Card>
               <CardHeader>
                 <CardTitle>Your Secret Option</CardTitle>
+                <CardDescription>
+                  {hasFinished 
+                    ? "You've finished! Waiting for others..." 
+                    : "Think you know your secret? Make your final guess below!"}
+                </CardDescription>
               </CardHeader>
-              <CardContent>
+              <CardContent className="space-y-4">
                 {myOption && (
                   <div className={cn(
                     "p-4 rounded-lg border-2 text-center font-semibold",
@@ -745,6 +763,27 @@ export default function GamePage() {
                         (Eliminated)
                       </div>
                     )}
+                  </div>
+                )}
+                {!hasFinished && (
+                  <Button
+                    onClick={() => setShowMyGuessModal(true)}
+                    className="w-full"
+                    size="lg"
+                    variant="default"
+                  >
+                    <Trophy className="w-4 h-4 mr-2" />
+                    Guess My Secret
+                  </Button>
+                )}
+                {myPlayer?.guessedOptionId && (
+                  <div className="p-3 bg-green-50 dark:bg-green-950 border border-green-500 rounded-lg">
+                    <div className="text-sm font-semibold text-green-700 dark:text-green-300 mb-1">
+                      Your Guess:
+                    </div>
+                    <div className="text-base font-bold text-green-800 dark:text-green-200">
+                      {options.find(o => o.id === myPlayer.guessedOptionId)?.text || 'Unknown'}
+                    </div>
                   </div>
                 )}
               </CardContent>
@@ -804,7 +843,7 @@ export default function GamePage() {
         </div>
       </div>
 
-      {/* Guess Selection Modal */}
+      {/* Guess Selection Modal for Other Players */}
       {showGuessModal && guessTargetPlayerId && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <Card className="w-full max-w-2xl max-h-[80vh] overflow-y-auto">
@@ -852,6 +891,58 @@ export default function GamePage() {
                           Current Guess
                         </Badge>
                       )}
+                    </button>
+                  );
+                })}
+              </div>
+            </CardContent>
+          </Card>
+        </div>
+      )}
+
+      {/* Guess My Own Secret Modal */}
+      {showMyGuessModal && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <Card className="w-full max-w-2xl max-h-[80vh] overflow-y-auto">
+            <CardHeader>
+              <div className="flex items-center justify-between">
+                <div>
+                  <CardTitle className="text-2xl">
+                    Guess Your Secret
+                  </CardTitle>
+                  <CardDescription className="text-base mt-2">
+                    Select which option you think is YOUR secret. This will mark you as finished!
+                  </CardDescription>
+                </div>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setShowMyGuessModal(false)}
+                >
+                  <X className="w-4 h-4" />
+                </Button>
+              </div>
+            </CardHeader>
+            <CardContent>
+              <div className="mb-4 p-4 bg-yellow-50 dark:bg-yellow-950 border-2 border-yellow-500 rounded-lg">
+                <p className="text-sm font-semibold text-yellow-800 dark:text-yellow-200">
+                  ⚠️ Important: This is your FINAL guess for your own secret. Once you submit, you'll be marked as finished!
+                </p>
+              </div>
+              <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-2">
+                {options.filter(o => !o.eliminated).map((option) => {
+                  return (
+                    <button
+                      key={option.id}
+                      onClick={() => handleGuessMyOwnSecret(option.id)}
+                      className={cn(
+                        "p-4 rounded-lg border-2 text-left transition-all",
+                        "hover:border-primary cursor-pointer hover:scale-105"
+                      )}
+                    >
+                      <div className="font-medium text-sm break-words">
+                        {option.text}
+                      </div>
                     </button>
                   );
                 })}
