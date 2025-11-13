@@ -160,12 +160,24 @@ export default function LobbyPage() {
       setError('Room name cannot be empty');
       return;
     }
+    if (newRoomName.trim().length > 30) {
+      setError('Room name must be 30 characters or less');
+      return;
+    }
     socket?.emit('updateRoomName', { roomId, roomName: newRoomName.trim() });
   };
 
   const handleAddOption = () => {
     if (!newOptionText.trim()) {
       setError('Option text cannot be empty');
+      return;
+    }
+    if (newOptionText.trim().length > 30) {
+      setError('Option text must be 30 characters or less');
+      return;
+    }
+    if (options.length >= 50) {
+      setError('Maximum 50 options allowed');
       return;
     }
     socket?.emit('addOption', { roomId, optionText: newOptionText.trim() });
@@ -257,10 +269,10 @@ export default function LobbyPage() {
             <CardHeader>
               <CardTitle className="flex items-center gap-2">
                 <Users className="w-5 h-5" />
-                Players ({players.length})
+                Players ({players.length}/4)
               </CardTitle>
               <CardDescription>
-                {players.length < 2 ? 'Waiting for more players...' : 'Ready to start!'}
+                {players.length < 2 ? 'Waiting for more players...' : players.length >= 4 ? 'Room is full!' : 'Ready to start!'}
               </CardDescription>
             </CardHeader>
             <CardContent>
@@ -362,25 +374,33 @@ export default function LobbyPage() {
                 ))}
               </div>
               {isAdmin && (
-                <div className="flex gap-2">
-                  <Input
-                    placeholder="Add new option..."
-                    value={newOptionText}
-                    onChange={(e) => setNewOptionText(e.target.value)}
-                    onKeyPress={(e) => {
-                      if (e.key === 'Enter') {
-                        handleAddOption();
-                      }
-                    }}
-                    className="flex-1"
-                  />
-                  <Button
-                    onClick={handleAddOption}
-                    size="sm"
-                    variant="outline"
-                  >
-                    <Plus className="w-4 h-4" />
-                  </Button>
+                <div className="space-y-2">
+                  <div className="flex gap-2">
+                    <Input
+                      placeholder="Add new option..."
+                      value={newOptionText}
+                      onChange={(e) => setNewOptionText(e.target.value)}
+                      onKeyPress={(e) => {
+                        if (e.key === 'Enter') {
+                          handleAddOption();
+                        }
+                      }}
+                      maxLength={30}
+                      className="flex-1"
+                      disabled={options.length >= 50}
+                    />
+                    <Button
+                      onClick={handleAddOption}
+                      size="sm"
+                      variant="outline"
+                      disabled={options.length >= 50}
+                    >
+                      <Plus className="w-4 h-4" />
+                    </Button>
+                  </div>
+                  <p className="text-xs text-muted-foreground">
+                    {newOptionText.length}/30 characters • {options.length}/50 options
+                  </p>
                 </div>
               )}
             </CardContent>
@@ -420,6 +440,7 @@ export default function LobbyPage() {
                           handleUpdateRoomName();
                         }
                       }}
+                      maxLength={30}
                       className="flex-1"
                     />
                     <Button
@@ -429,6 +450,9 @@ export default function LobbyPage() {
                       Update
                     </Button>
                   </div>
+                  <p className="text-xs text-muted-foreground">
+                    {newRoomName.length}/30 characters
+                  </p>
                 </div>
                 <div className="pt-4 border-t">
                   <p className="text-sm text-muted-foreground mb-2">

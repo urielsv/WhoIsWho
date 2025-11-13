@@ -43,11 +43,9 @@ export default function GamePage() {
 
   const [showGuessModal, setShowGuessModal] = useState(false);
   const [guessTargetPlayerId, setGuessTargetPlayerId] = useState<string | null>(null); // Which player we're guessing for
-  const [showMyGuessModal, setShowMyGuessModal] = useState(false); // Modal for guessing own secret
+  const [guessStep, setGuessStep] = useState(1); // Multi-step confirmation
   const [showHelp, setShowHelp] = useState(false);
   const [selectedBoardView, setSelectedBoardView] = useState<string | null>(null); // Which of MY boards to view (tracking which player)
-  const [bulkSelectMode, setBulkSelectMode] = useState(false);
-  const [bulkSelectedOptions, setBulkSelectedOptions] = useState<Set<string>>(new Set());
   const [gameResults, setGameResults] = useState<any[]>([]);
   const [gameStats, setGameStats] = useState<any>(null);
   
@@ -55,7 +53,10 @@ export default function GamePage() {
   const otherPlayers = players.filter(p => p.id !== playerId);
   
   // Get the currently selected board's options
-  const currentBoardOptions = selectedBoardView ? (myBoards[selectedBoardView] || []) : [];
+  // If board hasn't loaded yet, fall back to master options list
+  const currentBoardOptions = selectedBoardView 
+    ? (myBoards[selectedBoardView] || options.map(opt => ({ ...opt, state: 'normal' as const })))
+    : [];
 
   const isMyTurn = currentTurnPlayerId === playerId;
   const currentPlayer = players.find(p => p.id === currentTurnPlayerId);
@@ -64,21 +65,33 @@ export default function GamePage() {
   const remainingOptions = options.filter(o => !o.eliminated);
   const hasFinished = myPlayer?.hasFinished || false;
   
-  // Active players for asks/responds - display current turn player and the next in rotation
+  // Get the asks/responds pair from server logic
+  // The current turn player is the one ASKING, the other in the pair is RESPONDING
   const activePlayers = players.filter(p => !p.hasFinished);
-  // Get the two players who are currently in the asks/responds rotation
-  // This will be the current turn player and whoever asks/responds with them
-  const currentTurnPlayer = players.find(p => p.id === currentTurnPlayerId);
-  const currentPlayerIndex = activePlayers.findIndex(p => p.id === currentTurnPlayerId);
+  const askingPlayer = players.find(p => p.id === currentTurnPlayerId);
   
-  let asksRespondsPlayers: typeof players = [];
-  if (activePlayers.length >= 2 && currentPlayerIndex !== -1) {
-    // Find who the current player is paired with
-    // We'll show the current player and one other active player
-    const nextIndex = (currentPlayerIndex + 1) % activePlayers.length;
-    asksRespondsPlayers = [activePlayers[currentPlayerIndex], activePlayers[nextIndex]];
-  } else {
-    asksRespondsPlayers = activePlayers.slice(0, 2);
+  // Find the responding player (the other player in the current pair)
+  // Server logic: pair is determined by asksRespondsPairIndex, and turns alternate between the two
+  // Since we don't have the pair index, we use a heuristic:
+  // - If exactly 2 active players, they form the pair
+  // - Otherwise, the responder is the other player who has been alternating turns
+  let respondingPlayer: typeof players[0] | undefined;
+  if (activePlayers.length >= 2 && askingPlayer) {
+    if (activePlayers.length === 2) {
+      // Simple case: exactly 2 players, the other one is the responder
+      respondingPlayer = activePlayers.find(p => p.id !== currentTurnPlayerId);
+    } else {
+      // Multiple players: find the other player in the current pair
+      // Since turns alternate between pair members, we can check recent turn history
+      // For now, use a simple heuristic: the next active player (will be refined if needed)
+      const askingIndex = activePlayers.findIndex(p => p.id === currentTurnPlayerId);
+      if (askingIndex !== -1) {
+        // Try to find a player who has been alternating - for now, use next in list
+        // This is approximate but should work for most cases
+        const respondingIndex = (askingIndex + 1) % activePlayers.length;
+        respondingPlayer = activePlayers[respondingIndex];
+      }
+    }
   }
 
   useEffect(() => {
@@ -139,7 +152,17 @@ export default function GamePage() {
       setLastQuestion(`New asking pair: ${data.player1} ↔ ${data.player2}`);
     };
 
+    const handleBoardFinished = (data: any) => {
+      // Board was finished - update will come via roomUpdate
+    };
+
+    const handlePlayerFinishedAllBoards = (data: any) => {
+      // Player finished all boards - update will come via roomUpdate
+    };
+
     socket.on('roomUpdate', handleRoomUpdate);
+    socket.on('boardFinished', handleBoardFinished);
+    socket.on('playerFinishedAllBoards', handlePlayerFinishedAllBoards);
     socket.on('playerBoards', handlePlayerBoards);
     socket.on('boardUpdated', handleBoardUpdated);
     socket.on('questionAsked', handleQuestionAsked);
@@ -159,6 +182,8 @@ export default function GamePage() {
       socket.off('playerGaveUp', handlePlayerGaveUp);
       socket.off('gameFinished', handleGameFinished);
       socket.off('pairRotated', handlePairRotated);
+      socket.off('boardFinished', handleBoardFinished);
+      socket.off('playerFinishedAllBoards', handlePlayerFinishedAllBoards);
     };
   }, [socket, playerId, roomId, router, setPlayers, setOptions, setMyBoards, updateBoard, setGamePhase, setCurrentTurnPlayerId, setLastQuestion, otherPlayers, selectedBoardView]);
 
@@ -174,18 +199,6 @@ export default function GamePage() {
     const option = currentBoardOptions.find(o => o.id === optionId);
     if (!option || option.eliminated) return;
 
-    // Bulk select mode
-    if (bulkSelectMode) {
-      const newSelected = new Set(bulkSelectedOptions);
-      if (newSelected.has(optionId)) {
-        newSelected.delete(optionId);
-      } else {
-        newSelected.add(optionId);
-      }
-      setBulkSelectedOptions(newSelected);
-      return;
-    }
-
     // Simple toggle: click to discard/undiscard on MY private board for tracking this player
     socket?.emit('cycleOptionState', { 
       roomId, 
@@ -194,59 +207,53 @@ export default function GamePage() {
     });
   };
 
-  const handleBulkDiscard = () => {
-    if (bulkSelectedOptions.size === 0 || !selectedBoardView) return;
-    socket?.emit('bulkDiscard', {
-      roomId,
-      optionIds: Array.from(bulkSelectedOptions),
-      targetPlayerId: selectedBoardView
-    });
-    setBulkSelectedOptions(new Set());
-    setBulkSelectMode(false);
-  };
-
-  const handleMakeGuessForPlayer = (targetPlayerId: string) => {
+  const handleMakeFinalGuess = (targetPlayerId: string) => {
     // Don't allow guessing for yourself
     if (targetPlayerId === playerId) {
       alert("You can't guess your own option!");
       return;
     }
     setGuessTargetPlayerId(targetPlayerId);
+    setGuessStep(1);
     setShowGuessModal(true);
+  };
+
+  const handleNextGuessStep = () => {
+    if (guessStep === 1) {
+      setGuessStep(2);
+    } else if (guessStep === 2) {
+      setGuessStep(3);
+    }
   };
 
   const handleSelectGuessOption = (optionId: string) => {
     if (!guessTargetPlayerId) return;
     
-    // Save guess locally
-    addGuess(guessTargetPlayerId, optionId);
-    
-    // Send to server
-    socket?.emit('makeGuessForPlayer', { 
-      roomId, 
-      targetPlayerId: guessTargetPlayerId,
-      optionId
-    });
-    
-    setShowGuessModal(false);
-    setGuessTargetPlayerId(null);
-  };
-
-  const handleGuessMyOwnSecret = (optionId: string) => {
-    // This is the final guess for your own secret - marks you as finished
-    if (confirm('Are you sure this is your secret? This will mark you as finished.')) {
-      socket?.emit('makeGuess', { 
+    if (guessStep < 3) {
+      // Save guess locally for preview
+      addGuess(guessTargetPlayerId, optionId);
+      handleNextGuessStep();
+    } else {
+      // Final confirmation - submit the guess
+      socket?.emit('makeGuessForPlayer', { 
         roomId, 
+        targetPlayerId: guessTargetPlayerId,
         optionId,
         confirmation: 'CONFIRMED'
       });
-      setShowMyGuessModal(false);
+      
+      setShowGuessModal(false);
+      setGuessTargetPlayerId(null);
+      setGuessStep(1);
     }
   };
 
-  const handleGiveUp = () => {
-    if (confirm('Are you sure you want to give up? You will be marked as finished.')) {
-      socket?.emit('giveUp', { roomId });
+  const handleGiveUpOnBoard = (targetPlayerId: string) => {
+    if (confirm(`Are you sure you want to give up on ${players.find(p => p.id === targetPlayerId)?.username}'s board? This will mark this board as finished.`)) {
+      socket?.emit('giveUpOnBoard', { 
+        roomId, 
+        targetPlayerId 
+      });
     }
   };
 
@@ -264,21 +271,29 @@ export default function GamePage() {
     }
   };
 
-  const getOptionStateLabel = (state: OptionState | undefined, discardedForPlayerId?: string) => {
+  const getOptionStateLabel = (state: OptionState | undefined) => {
     if (state === 'discarded') {
-      const player = players.find(p => p.id === discardedForPlayerId);
-      return player ? `Discarded for ${player.username}` : 'Discarded';
+      return 'Discarded';
     }
     return '';
   };
 
   if (gamePhase === 'finished') {
-    const winners = gameResults.filter((r: any) => r.isCorrect);
-    const hasWinners = winners.length > 0;
+    // Group results by player
+    const resultsByPlayer = new Map<string, any[]>();
+    gameResults.forEach((result: any) => {
+      if (!resultsByPlayer.has(result.playerId)) {
+        resultsByPlayer.set(result.playerId, []);
+      }
+      resultsByPlayer.get(result.playerId)!.push(result);
+    });
+    
+    const totalCorrect = gameResults.filter((r: any) => r.isCorrect).length;
+    const hasWinners = totalCorrect > 0;
     
     return (
       <div className="min-h-screen bg-gradient-to-br from-purple-50 via-pink-50 to-yellow-50 dark:from-gray-900 dark:via-purple-900 dark:to-pink-900 flex items-center justify-center p-4">
-        <div className="w-full max-w-4xl space-y-6">
+        <div className="w-full max-w-6xl space-y-6">
           {/* Header with Celebration */}
           <Card className="text-center border-4 border-yellow-400 dark:border-yellow-500 shadow-2xl">
             <CardHeader className="pb-4">
@@ -297,7 +312,7 @@ export default function GamePage() {
               </CardTitle>
               <CardDescription className="text-lg mt-2">
                 {hasWinners 
-                  ? `${winners.length} ${winners.length === 1 ? 'Player' : 'Players'} Guessed Correctly!`
+                  ? `${totalCorrect} Correct ${totalCorrect === 1 ? 'Guess' : 'Guesses'} Across All Boards!`
                   : 'Everyone gave their best shot!'}
               </CardDescription>
             </CardHeader>
@@ -307,14 +322,18 @@ export default function GamePage() {
           {gameStats && (
             <Card className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-950 dark:to-indigo-950 border-blue-200 dark:border-blue-800">
               <CardContent className="pt-6">
-                <div className="grid grid-cols-3 gap-4 text-center">
+                <div className="grid grid-cols-4 gap-4 text-center">
                   <div>
                     <div className="text-3xl font-bold text-blue-600 dark:text-blue-400">{gameStats.totalPlayers}</div>
-                    <div className="text-sm text-muted-foreground">Total Players</div>
+                    <div className="text-sm text-muted-foreground">Players</div>
+                  </div>
+                  <div>
+                    <div className="text-3xl font-bold text-purple-600 dark:text-purple-400">{gameStats.totalBoards}</div>
+                    <div className="text-sm text-muted-foreground">Total Boards</div>
                   </div>
                   <div>
                     <div className="text-3xl font-bold text-green-600 dark:text-green-400">{gameStats.correctGuesses}</div>
-                    <div className="text-sm text-muted-foreground">Correct Guesses</div>
+                    <div className="text-sm text-muted-foreground">Correct</div>
                   </div>
                   <div>
                     <div className="text-3xl font-bold text-orange-600 dark:text-orange-400">{gameStats.gaveUp}</div>
@@ -325,99 +344,98 @@ export default function GamePage() {
             </Card>
           )}
 
-          {/* Results Grid */}
-          <div className="grid md:grid-cols-2 gap-4">
-            {gameResults.map((result: any, index: number) => {
-              const isWinner = result.isCorrect;
-              const isMe = result.playerId === playerId;
+          {/* Results by Player */}
+          <div className="space-y-6">
+            {Array.from(resultsByPlayer.entries()).map(([resultPlayerId, playerResults]: [string, any[]]) => {
+              const player = players.find(p => p.id === resultPlayerId);
+              const isMe = resultPlayerId === playerId;
+              const playerCorrect = playerResults.filter(r => r.isCorrect).length;
               
               return (
-                <Card 
-                  key={result.playerId} 
-                  className={cn(
-                    "transition-all duration-300 hover:scale-105",
-                    isWinner && "border-4 border-green-500 dark:border-green-400 bg-gradient-to-br from-green-50 to-emerald-50 dark:from-green-950 dark:to-emerald-950 shadow-xl",
-                    !isWinner && !result.gaveUp && "border-2 border-red-300 dark:border-red-700 bg-gradient-to-br from-red-50 to-pink-50 dark:from-red-950 dark:to-pink-950",
-                    result.gaveUp && "border-2 border-gray-300 dark:border-gray-700 bg-gradient-to-br from-gray-50 to-slate-50 dark:from-gray-950 dark:to-slate-950"
-                  )}
-                  style={{ animationDelay: `${index * 100}ms` }}
-                >
+                <Card key={resultPlayerId} className="border-2">
                   <CardHeader>
                     <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <div className={cn(
-                          "w-10 h-10 rounded-full flex items-center justify-center font-bold text-white",
-                          isWinner && "bg-gradient-to-br from-green-500 to-emerald-600",
-                          !isWinner && !result.gaveUp && "bg-gradient-to-br from-red-500 to-pink-600",
-                          result.gaveUp && "bg-gradient-to-br from-gray-500 to-slate-600"
-                        )}>
-                          {isWinner ? <Award className="w-5 h-5" /> : <User className="w-5 h-5" />}
-                        </div>
-                        <div>
-                          <CardTitle className="text-xl">
-                            {result.playerName}
-                            {isMe && <span className="ml-2 text-sm text-muted-foreground">(You)</span>}
-                          </CardTitle>
-                          {isWinner && (
-                            <Badge className="mt-1 bg-green-500 text-white">
-                              <Star className="w-3 h-3 mr-1" />
-                              Winner!
-                            </Badge>
-                          )}
-                        </div>
-                      </div>
+                      <CardTitle className="text-2xl">
+                        {player?.username}
+                        {isMe && <span className="ml-2 text-sm text-muted-foreground">(You)</span>}
+                      </CardTitle>
+                      <Badge variant={playerCorrect > 0 ? "default" : "secondary"} className="text-lg px-4 py-1">
+                        {playerCorrect} / {playerResults.length} Correct
+                      </Badge>
                     </div>
                   </CardHeader>
-                  <CardContent className="space-y-3">
-                    {/* Actual Secret - Revealed! */}
-                    <div className="p-3 bg-primary/10 rounded-lg border-2 border-primary/30">
-                      <div className="text-xs font-semibold text-primary mb-1 uppercase tracking-wide">
-                        Actual Secret
-                      </div>
-                      <div className="text-lg font-bold text-primary">
-                        {result.actualSecretText}
-                      </div>
+                  <CardContent>
+                    <div className="grid md:grid-cols-2 gap-4">
+                      {playerResults.map((result: any, index: number) => {
+                        const isWinner = result.isCorrect;
+                        
+                        return (
+                          <Card 
+                            key={`${result.playerId}-${result.targetPlayerId}`}
+                            className={cn(
+                              "transition-all duration-300 hover:scale-105",
+                              isWinner && "border-2 border-green-500 dark:border-green-400 bg-gradient-to-br from-green-50 to-emerald-50 dark:from-green-950 dark:to-emerald-950",
+                              !isWinner && !result.gaveUp && "border-2 border-red-300 dark:border-red-700 bg-gradient-to-br from-red-50 to-pink-50 dark:from-red-950 dark:to-pink-950",
+                              result.gaveUp && "border-2 border-gray-300 dark:border-gray-700 bg-gradient-to-br from-gray-50 to-slate-50 dark:from-gray-950 dark:to-slate-950"
+                            )}
+                          >
+                            <CardHeader className="pb-3">
+                              <CardTitle className="text-lg flex items-center gap-2">
+                                <User className="w-4 h-4" />
+                                Guessing: {result.targetPlayerName}
+                                {isWinner && (
+                                  <Badge className="ml-auto bg-green-500 text-white">
+                                    <Star className="w-3 h-3 mr-1" />
+                                    Correct!
+                                  </Badge>
+                                )}
+                              </CardTitle>
+                            </CardHeader>
+                            <CardContent className="space-y-2">
+                              <div className="p-2 bg-primary/10 rounded border border-primary/30">
+                                <div className="text-xs font-semibold text-primary mb-1">Actual Secret:</div>
+                                <div className="text-sm font-bold text-primary">{result.actualSecretText}</div>
+                              </div>
+                              {result.gaveUp ? (
+                                <div className="p-2 bg-gray-100 dark:bg-gray-800 rounded border border-gray-300 dark:border-gray-700">
+                                  <div className="text-xs text-muted-foreground flex items-center gap-2">
+                                    <XCircle className="w-3 h-3" />
+                                    Gave Up
+                                  </div>
+                                </div>
+                              ) : (
+                                <div className={cn(
+                                  "p-2 rounded border-2",
+                                  isWinner 
+                                    ? "bg-green-100 dark:bg-green-900 border-green-400 dark:border-green-600" 
+                                    : "bg-red-100 dark:bg-red-900 border-red-400 dark:border-red-600"
+                                )}>
+                                  <div className="text-xs font-semibold mb-1 flex items-center gap-2">
+                                    {isWinner ? (
+                                      <>
+                                        <CheckCircle className="w-3 h-3 text-green-600 dark:text-green-400" />
+                                        <span className="text-green-700 dark:text-green-300">Your Guess:</span>
+                                      </>
+                                    ) : (
+                                      <>
+                                        <XCircle className="w-3 h-3 text-red-600 dark:text-red-400" />
+                                        <span className="text-red-700 dark:text-red-300">Your Guess:</span>
+                                      </>
+                                    )}
+                                  </div>
+                                  <div className={cn(
+                                    "text-sm font-medium",
+                                    isWinner ? "text-green-800 dark:text-green-200" : "text-red-800 dark:text-red-200"
+                                  )}>
+                                    {result.guessedOptionText}
+                                  </div>
+                                </div>
+                              )}
+                            </CardContent>
+                          </Card>
+                        );
+                      })}
                     </div>
-
-                    {/* Their Guess */}
-                    {result.gaveUp ? (
-                      <div className="p-3 bg-gray-100 dark:bg-gray-800 rounded-lg border border-gray-300 dark:border-gray-700">
-                        <div className="text-xs font-semibold text-muted-foreground mb-1 uppercase tracking-wide">
-                          Result
-                        </div>
-                        <div className="text-base text-muted-foreground flex items-center gap-2">
-                          <XCircle className="w-4 h-4" />
-                          Gave Up
-                        </div>
-                      </div>
-                    ) : (
-                      <div className={cn(
-                        "p-3 rounded-lg border-2",
-                        isWinner 
-                          ? "bg-green-100 dark:bg-green-900 border-green-400 dark:border-green-600" 
-                          : "bg-red-100 dark:bg-red-900 border-red-400 dark:border-red-600"
-                      )}>
-                        <div className="text-xs font-semibold mb-1 uppercase tracking-wide flex items-center gap-2">
-                          {isWinner ? (
-                            <>
-                              <CheckCircle className="w-4 h-4 text-green-600 dark:text-green-400" />
-                              <span className="text-green-700 dark:text-green-300">Correct Guess!</span>
-                            </>
-                          ) : (
-                            <>
-                              <XCircle className="w-4 h-4 text-red-600 dark:text-red-400" />
-                              <span className="text-red-700 dark:text-red-300">Incorrect Guess</span>
-                            </>
-                          )}
-                        </div>
-                        <div className={cn(
-                          "text-base font-medium",
-                          isWinner ? "text-green-800 dark:text-green-200" : "text-red-800 dark:text-red-200"
-                        )}>
-                          {result.guessedOptionText}
-                        </div>
-                      </div>
-                    )}
                   </CardContent>
                 </Card>
               );
@@ -459,16 +477,19 @@ export default function GamePage() {
               <HelpCircle className="w-4 h-4" />
             </Button>
           </div>
-          <div className="flex items-center justify-center gap-4">
-            <Badge variant="secondary" className="text-lg px-4 py-1">
-              {gamePhase === 'question' ? 'Question Phase' : 'Elimination Phase'}
-            </Badge>
-            {asksRespondsPlayers.length >= 2 && (
-              <Badge variant="outline" className="text-sm">
-                Asks ↔ Responds: {asksRespondsPlayers.map(p => p.username).join(' ↔ ')}
-              </Badge>
+            {askingPlayer && respondingPlayer && (
+              <div className="flex items-center justify-center gap-3">
+                <Badge variant="default" className="text-sm px-3 py-1">
+                  <MessageSquare className="w-3 h-3 mr-1" />
+                  {askingPlayer.username} asking
+                </Badge>
+                <ArrowRight className="w-4 h-4 text-muted-foreground" />
+                <Badge variant="outline" className="text-sm px-3 py-1">
+                  <User className="w-3 h-3 mr-1" />
+                  {respondingPlayer.username} responding
+                </Badge>
+              </div>
             )}
-          </div>
         </div>
 
         {showHelp && (
@@ -524,11 +545,41 @@ export default function GamePage() {
             <Card>
               <CardHeader>
                 <CardTitle className="flex items-center justify-between">
-                  <span>Current Turn: {currentPlayer?.username}</span>
+                  <span>Current Turn</span>
                   {isMyTurn && <Badge>Your Turn</Badge>}
                 </CardTitle>
               </CardHeader>
-              <CardContent>
+              <CardContent className="space-y-4">
+                {/* Asking/Responding Display */}
+                {askingPlayer && respondingPlayer && (
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className={cn(
+                      "p-3 rounded-lg border-2 text-center",
+                      askingPlayer.id === playerId 
+                        ? "bg-primary text-primary-foreground border-primary" 
+                        : "bg-blue-50 dark:bg-blue-950 border-blue-300 dark:border-blue-700"
+                    )}>
+                      <div className="text-xs font-semibold mb-1 uppercase tracking-wide">Asking</div>
+                      <div className="text-base font-bold">{askingPlayer.username}</div>
+                      {askingPlayer.id === playerId && (
+                        <Badge variant="secondary" className="mt-1 text-xs">You</Badge>
+                      )}
+                    </div>
+                    <div className={cn(
+                      "p-3 rounded-lg border-2 text-center",
+                      respondingPlayer.id === playerId 
+                        ? "bg-primary text-primary-foreground border-primary" 
+                        : "bg-green-50 dark:bg-green-950 border-green-300 dark:border-green-700"
+                    )}>
+                      <div className="text-xs font-semibold mb-1 uppercase tracking-wide">Responding</div>
+                      <div className="text-base font-bold">{respondingPlayer.username}</div>
+                      {respondingPlayer.id === playerId && (
+                        <Badge variant="secondary" className="mt-1 text-xs">You</Badge>
+                      )}
+                    </div>
+                  </div>
+                )}
+
                 {gamePhase === 'question' && isMyTurn && !hasFinished && (
                   <div className="space-y-4">
                     <Button onClick={handleAskQuestion} className="w-full" size="lg">
@@ -541,9 +592,16 @@ export default function GamePage() {
                   </div>
                 )}
 
-                {gamePhase === 'question' && !isMyTurn && (
-                  <div className="text-center py-4 text-muted-foreground">
-                    Waiting for {currentPlayer?.username} to ask a question...
+                {gamePhase === 'question' && !isMyTurn && askingPlayer && (
+                  <div className="text-center py-4">
+                    <p className="text-muted-foreground">
+                      <strong>{askingPlayer.username}</strong> is asking a question...
+                    </p>
+                    {respondingPlayer && (
+                      <p className="text-sm text-muted-foreground mt-1">
+                        {respondingPlayer.username} will respond
+                      </p>
+                    )}
                   </div>
                 )}
 
@@ -561,27 +619,11 @@ export default function GamePage() {
             {/* Player Board Carousel */}
             <Card>
               <CardHeader>
-                <div className="flex items-center justify-between">
-                  <div>
-                    <CardTitle>Player Boards</CardTitle>
-                    <CardDescription>
-                      View and manage options for different players
-                    </CardDescription>
-                  </div>
-                  <div className="flex gap-2">
-                    <Button
-                      variant={bulkSelectMode ? "default" : "outline"}
-                      size="sm"
-                      onClick={() => {
-                        setBulkSelectMode(!bulkSelectMode);
-                        if (bulkSelectMode) {
-                          setBulkSelectedOptions(new Set());
-                        }
-                      }}
-                    >
-                      {bulkSelectMode ? 'Cancel Bulk' : 'Bulk Select'}
-                    </Button>
-                  </div>
+                <div>
+                  <CardTitle>Player Boards</CardTitle>
+                  <CardDescription>
+                    View and manage options for different players
+                  </CardDescription>
                 </div>
               </CardHeader>
               <CardContent>
@@ -618,22 +660,61 @@ export default function GamePage() {
                         Your PRIVATE notes about who {players.find(p => p.id === selectedBoardView)?.username}'s secret might be
                       </div>
                     </div>
-                    {selectedBoardView && !hasFinished && (
-                      <Button
-                        onClick={() => handleMakeGuessForPlayer(selectedBoardView)}
-                        size="sm"
-                        variant={myGuesses[selectedBoardView] ? "outline" : "default"}
-                        className={myGuesses[selectedBoardView] ? "border-green-500 text-green-700 dark:text-green-400" : ""}
-                      >
-                        <Star className="w-3 h-3 mr-1" />
-                        {myGuesses[selectedBoardView] ? 'Change Guess' : 'Make Guess'}
-                      </Button>
+                    {selectedBoardView && (
+                      <div className="flex gap-2">
+                        {myPlayer?.boardStatus?.[selectedBoardView] ? (
+                          <Badge variant={myPlayer.boardStatus[selectedBoardView] === 'guessed' ? "default" : "secondary"} className="px-3 py-1">
+                            {myPlayer.boardStatus[selectedBoardView] === 'guessed' ? (
+                              <>
+                                <CheckCircle className="w-3 h-3 mr-1" />
+                                Finished - {options.find(o => o.id === myPlayer.guesses?.[selectedBoardView])?.text || 'Unknown'}
+                              </>
+                            ) : (
+                              <>
+                                <XCircle className="w-3 h-3 mr-1" />
+                                Gave Up
+                              </>
+                            )}
+                          </Badge>
+                        ) : (
+                          <>
+                            <Button
+                              onClick={() => handleMakeFinalGuess(selectedBoardView)}
+                              size="sm"
+                              variant="default"
+                              className="bg-green-600 hover:bg-green-700"
+                              disabled={hasFinished}
+                            >
+                              <Trophy className="w-3 h-3 mr-1" />
+                              Final Guess
+                            </Button>
+                            <Button
+                              onClick={() => handleGiveUpOnBoard(selectedBoardView)}
+                              size="sm"
+                              variant="outline"
+                              disabled={hasFinished}
+                            >
+                              <XCircle className="w-3 h-3 mr-1" />
+                              Give Up
+                            </Button>
+                          </>
+                        )}
+                      </div>
                     )}
                   </div>
-                  <div className="grid sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
-                    {currentBoardOptions.map((option) => {
-                      const stateLabel = getOptionStateLabel(option.state, option.discardedForPlayerId);
-                      const isBulkSelected = bulkSelectedOptions.has(option.id);
+                  {!selectedBoardView ? (
+                    <div className="text-center py-8 text-muted-foreground">
+                      <p>Select a player board above to start tracking options</p>
+                    </div>
+                  ) : (
+                    <div className="grid sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
+                      {currentBoardOptions.length === 0 ? (
+                        <div className="col-span-full text-center py-8 text-muted-foreground">
+                          <p>Loading board options...</p>
+                        </div>
+                      ) : (
+                        currentBoardOptions.map((option) => {
+                      const stateLabel = getOptionStateLabel(option.state);
                       const isMyGuess = myGuesses[selectedBoardView || ''] === option.id;
                       const isDiscarded = option.state === 'discarded';
                       
@@ -641,13 +722,13 @@ export default function GamePage() {
                         <button
                           key={option.id}
                           onClick={() => handleOptionClick(option.id)}
-                          disabled={option.eliminated || hasFinished}
+                          disabled={option.eliminated || hasFinished || !!myPlayer?.boardStatus?.[selectedBoardView]}
                           className={cn(
                             "p-3 rounded-lg border-2 text-left transition-all relative",
                             option.eliminated && "opacity-30 line-through bg-gray-100 dark:bg-gray-800 cursor-not-allowed",
-                            !option.eliminated && !hasFinished && "hover:border-primary cursor-pointer",
+                            !option.eliminated && !hasFinished && !myPlayer?.boardStatus?.[selectedBoardView] && "hover:border-primary cursor-pointer",
+                            (hasFinished || myPlayer?.boardStatus?.[selectedBoardView]) && !option.eliminated && "cursor-not-allowed opacity-75",
                             getOptionStateColor(option.state),
-                            isBulkSelected && "ring-4 ring-blue-500 border-blue-500",
                             isDiscarded && "opacity-60",
                             isMyGuess && "ring-2 ring-green-500 bg-green-50 dark:bg-green-950"
                           )}
@@ -665,53 +746,28 @@ export default function GamePage() {
                               {stateLabel}
                             </Badge>
                           )}
-                          {isBulkSelected && (
-                            <div className="absolute top-1 right-1">
-                              <div className="w-4 h-4 bg-blue-500 rounded-full flex items-center justify-center">
-                                <CheckCircle className="w-3 h-3 text-white" />
-                              </div>
-                            </div>
-                          )}
                         </button>
                       );
-                    })}
-                  </div>
-
-                  {/* Bulk Actions */}
-                  {bulkSelectMode && bulkSelectedOptions.size > 0 && (
-                    <Card className="bg-blue-50 dark:bg-blue-950 border-blue-200 dark:border-blue-800">
-                      <CardContent className="pt-4">
-                        <div className="flex items-center justify-between">
-                          <div>
-                            <p className="font-medium">{bulkSelectedOptions.size} options selected</p>
-                            <p className="text-sm text-muted-foreground">Discard all selected on this board</p>
-                          </div>
-                          <Button
-                            onClick={handleBulkDiscard}
-                            size="sm"
-                            variant="default"
-                          >
-                            Discard Selected
-                          </Button>
-                        </div>
-                      </CardContent>
-                    </Card>
+                    }))}
+                    </div>
                   )}
 
-                  {/* Quick Actions */}
-                  {!hasFinished && !bulkSelectMode && (
-                    <div className="flex gap-2 flex-wrap">
-                      <Button
-                        onClick={handleGiveUp}
-                        variant="outline"
-                        size="sm"
-                      >
-                        <XCircle className="w-4 h-4 mr-2" />
-                        Give Up
-                      </Button>
-                      <p className="text-xs text-muted-foreground self-center">
-                        💡 Tip: Each board is YOUR private detective notes - other players can't see them!
-                      </p>
+                  {/* Quick Board Status - Compact */}
+                  {otherPlayers.length > 1 && (
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <span className="text-xs font-medium text-muted-foreground">Boards:</span>
+                      {otherPlayers.map((player) => {
+                        const boardStatus = myPlayer?.boardStatus?.[player.id];
+                        return (
+                          <Badge 
+                            key={player.id}
+                            variant={boardStatus === 'guessed' ? "default" : boardStatus === 'gaveUp' ? "secondary" : "outline"}
+                            className="text-xs"
+                          >
+                            {player.username}: {boardStatus === 'guessed' ? '✓' : boardStatus === 'gaveUp' ? '✗' : '○'}
+                          </Badge>
+                        );
+                      })}
                     </div>
                   )}
                 </div>
@@ -721,17 +777,14 @@ export default function GamePage() {
 
           {/* Sidebar */}
           <div className="space-y-6">
-            <Card>
-              <CardHeader>
-                <CardTitle>Your Secret Option</CardTitle>
-                <CardDescription>
-                  {hasFinished 
-                    ? "You've finished! Waiting for others..." 
-                    : "Think you know your secret? Make your final guess below!"}
-                </CardDescription>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                {myOption && (
+            {/* Your Secret */}
+            {myOption && (
+              <Card>
+                <CardHeader>
+                  <CardTitle>Your Secret</CardTitle>
+                  <CardDescription>This is the option you're trying to figure out</CardDescription>
+                </CardHeader>
+                <CardContent>
                   <div className={cn(
                     "p-4 rounded-lg border-2 text-center font-semibold",
                     myOption.eliminated ? "bg-destructive/10 border-destructive" : "bg-yellow-500/10 border-yellow-500"
@@ -743,30 +796,9 @@ export default function GamePage() {
                       </div>
                     )}
                   </div>
-                )}
-                {!hasFinished && (
-                  <Button
-                    onClick={() => setShowMyGuessModal(true)}
-                    className="w-full"
-                    size="lg"
-                    variant="default"
-                  >
-                    <Trophy className="w-4 h-4 mr-2" />
-                    Guess My Secret
-                  </Button>
-                )}
-                {myPlayer?.guessedOptionId && (
-                  <div className="p-3 bg-green-50 dark:bg-green-950 border border-green-500 rounded-lg">
-                    <div className="text-sm font-semibold text-green-700 dark:text-green-300 mb-1">
-                      Your Guess:
-                    </div>
-                    <div className="text-base font-bold text-green-800 dark:text-green-200">
-                      {options.find(o => o.id === myPlayer.guessedOptionId)?.text || 'Unknown'}
-                    </div>
-                  </div>
-                )}
-              </CardContent>
-            </Card>
+                </CardContent>
+              </Card>
+            )}
 
             <Card>
               <CardHeader>
@@ -790,31 +822,38 @@ export default function GamePage() {
               </CardHeader>
               <CardContent>
                 <div className="space-y-2">
-                  {players.map((player) => (
-                    <div
-                      key={player.id}
-                      className={cn(
-                        "p-2 rounded text-sm flex items-center justify-between",
-                        player.id === currentTurnPlayerId ? "bg-primary text-primary-foreground" : "bg-secondary",
-                        player.hasFinished && "opacity-60",
-                        asksRespondsPlayers.some(p => p.id === player.id) && "ring-2 ring-blue-500"
-                      )}
-                    >
-                      <div className="flex items-center gap-2">
-                        <User className="w-4 h-4" />
-                        {player.username}
-                        {player.id === currentTurnPlayerId && " (Current)"}
-                        {asksRespondsPlayers.some(p => p.id === player.id) && (
-                          <Badge variant="outline" className="text-xs">Asking</Badge>
+                  {players.map((player) => {
+                    const isAsking = player.id === currentTurnPlayerId;
+                    const isResponding = respondingPlayer?.id === player.id;
+                    
+                    return (
+                      <div
+                        key={player.id}
+                        className={cn(
+                          "p-2 rounded text-sm flex items-center justify-between",
+                          isAsking ? "bg-primary text-primary-foreground" : "bg-secondary",
+                          player.hasFinished && "opacity-60"
+                        )}
+                      >
+                        <div className="flex items-center gap-2">
+                          <User className="w-4 h-4" />
+                          {player.username}
+                          {player.id === playerId && " (You)"}
+                          {isAsking && (
+                            <Badge variant="default" className="text-xs">Asking</Badge>
+                          )}
+                          {isResponding && !isAsking && (
+                            <Badge variant="outline" className="text-xs bg-green-100 dark:bg-green-900">Responding</Badge>
+                          )}
+                        </div>
+                        {player.hasFinished && (
+                          <Badge variant="outline" className="text-xs">
+                            Finished
+                          </Badge>
                         )}
                       </div>
-                      {player.hasFinished && (
-                        <Badge variant="outline" className="text-xs">
-                          {player.guessedOptionId ? 'Guessed' : 'Gave Up'}
-                        </Badge>
-                      )}
-                    </div>
-                  ))}
+                    );
+                  })}
                 </div>
               </CardContent>
             </Card>
@@ -822,18 +861,20 @@ export default function GamePage() {
         </div>
       </div>
 
-      {/* Guess Selection Modal for Other Players */}
+      {/* Final Guess Modal with Multi-Step Confirmation */}
       {showGuessModal && guessTargetPlayerId && (
         <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
           <Card className="w-full max-w-2xl max-h-[80vh] overflow-y-auto">
             <CardHeader>
               <div className="flex items-center justify-between">
                 <div>
-                  <CardTitle>
-                    Make Guess for {players.find(p => p.id === guessTargetPlayerId)?.username}
+                  <CardTitle className="text-2xl">
+                    Final Guess for {players.find(p => p.id === guessTargetPlayerId)?.username}
                   </CardTitle>
-                  <CardDescription>
-                    Select which option you think belongs to this player
+                  <CardDescription className="text-base mt-2">
+                    {guessStep === 1 && "Step 1: Select which option you think belongs to this player"}
+                    {guessStep === 2 && "Step 2: Review your selection"}
+                    {guessStep === 3 && "Step 3: Confirm your final guess - this will lock this board!"}
                   </CardDescription>
                 </div>
                 <Button
@@ -842,90 +883,98 @@ export default function GamePage() {
                   onClick={() => {
                     setShowGuessModal(false);
                     setGuessTargetPlayerId(null);
+                    setGuessStep(1);
                   }}
                 >
                   <X className="w-4 h-4" />
                 </Button>
               </div>
             </CardHeader>
-            <CardContent>
-              <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-2">
-                {options.filter(o => !o.eliminated).map((option) => {
-                  const isCurrentGuess = myGuesses[guessTargetPlayerId] === option.id;
-                  return (
-                    <button
-                      key={option.id}
-                      onClick={() => handleSelectGuessOption(option.id)}
-                      className={cn(
-                        "p-3 rounded-lg border-2 text-left transition-all",
-                        "hover:border-primary cursor-pointer",
-                        isCurrentGuess && "ring-2 ring-green-500 bg-green-50 dark:bg-green-950 border-green-500"
-                      )}
+            <CardContent className="space-y-4">
+              {guessStep === 1 && (
+                <>
+                  <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-2">
+                    {options.filter(o => !o.eliminated).map((option) => (
+                      <button
+                        key={option.id}
+                        onClick={() => handleSelectGuessOption(option.id)}
+                        className={cn(
+                          "p-3 rounded-lg border-2 text-left transition-all",
+                          "hover:border-primary cursor-pointer"
+                        )}
+                      >
+                        <div className="font-medium text-sm break-words">
+                          {option.text}
+                        </div>
+                      </button>
+                    ))}
+                  </div>
+                </>
+              )}
+              
+              {guessStep === 2 && (
+                <>
+                  <div className="p-4 bg-blue-50 dark:bg-blue-950 border-2 border-blue-500 rounded-lg">
+                    <p className="text-sm font-semibold text-blue-800 dark:text-blue-200 mb-2">
+                      Your Selection:
+                    </p>
+                    <p className="text-lg font-bold">
+                      {options.find(o => o.id === myGuesses[guessTargetPlayerId])?.text || 'Unknown'}
+                    </p>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      onClick={handleNextGuessStep}
+                      className="flex-1"
+                      size="lg"
                     >
-                      <div className="font-medium text-sm break-words">
-                        {option.text}
-                      </div>
-                      {isCurrentGuess && (
-                        <Badge variant="default" className="mt-1 text-xs bg-green-600">
-                          Current Guess
-                        </Badge>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
-            </CardContent>
-          </Card>
-        </div>
-      )}
-
-      {/* Guess My Own Secret Modal */}
-      {showMyGuessModal && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
-          <Card className="w-full max-w-2xl max-h-[80vh] overflow-y-auto">
-            <CardHeader>
-              <div className="flex items-center justify-between">
-                <div>
-                  <CardTitle className="text-2xl">
-                    Guess Your Secret
-                  </CardTitle>
-                  <CardDescription className="text-base mt-2">
-                    Select which option you think is YOUR secret. This will mark you as finished!
-                  </CardDescription>
-                </div>
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setShowMyGuessModal(false)}
-                >
-                  <X className="w-4 h-4" />
-                </Button>
-              </div>
-            </CardHeader>
-            <CardContent>
-              <div className="mb-4 p-4 bg-yellow-50 dark:bg-yellow-950 border-2 border-yellow-500 rounded-lg">
-                <p className="text-sm font-semibold text-yellow-800 dark:text-yellow-200">
-                  ⚠️ Important: This is your FINAL guess for your own secret. Once you submit, you'll be marked as finished!
-                </p>
-              </div>
-              <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-2">
-                {options.filter(o => !o.eliminated).map((option) => {
-                  return (
-                    <button
-                      key={option.id}
-                      onClick={() => handleGuessMyOwnSecret(option.id)}
-                      className={cn(
-                        "p-4 rounded-lg border-2 text-left transition-all",
-                        "hover:border-primary cursor-pointer hover:scale-105"
-                      )}
+                      Continue to Confirm
+                    </Button>
+                    <Button
+                      onClick={() => setGuessStep(1)}
+                      variant="outline"
                     >
-                      <div className="font-medium text-sm break-words">
-                        {option.text}
-                      </div>
-                    </button>
-                  );
-                })}
-              </div>
+                      Change Selection
+                    </Button>
+                  </div>
+                </>
+              )}
+              
+              {guessStep === 3 && (
+                <>
+                  <div className="p-4 bg-yellow-50 dark:bg-yellow-950 border-2 border-yellow-500 rounded-lg">
+                    <p className="text-sm font-semibold text-yellow-800 dark:text-yellow-200 mb-2">
+                      ⚠️ Final Confirmation
+                    </p>
+                    <p className="text-base mb-2">
+                      You are about to submit your final guess for <strong>{players.find(p => p.id === guessTargetPlayerId)?.username}</strong>:
+                    </p>
+                    <p className="text-lg font-bold mb-4">
+                      {options.find(o => o.id === myGuesses[guessTargetPlayerId])?.text || 'Unknown'}
+                    </p>
+                    <p className="text-sm text-yellow-700 dark:text-yellow-300">
+                      This will lock this board and you won't be able to change it!
+                    </p>
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      onClick={() => handleSelectGuessOption(myGuesses[guessTargetPlayerId] || '')}
+                      className="flex-1"
+                      size="lg"
+                      variant="default"
+                    >
+                      <Trophy className="w-4 h-4 mr-2" />
+                      Confirm Final Guess
+                    </Button>
+                    <Button
+                      onClick={() => setGuessStep(2)}
+                      variant="outline"
+                    >
+                      Go Back
+                    </Button>
+                  </div>
+                </>
+              )}
             </CardContent>
           </Card>
         </div>

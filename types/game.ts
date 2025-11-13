@@ -6,7 +6,8 @@ export interface Player {
   hasFinished?: boolean;
   guessedOptionId?: string | null;
   notes?: string;
-  guesses?: Record<string, string>; // Map of targetPlayerId -> optionId (one guess per player)
+  guesses?: Record<string, string>; // Map of targetPlayerId -> optionId (final guess per board)
+  boardStatus?: Record<string, 'guessed' | 'gaveUp'>; // Map of targetPlayerId -> status (per board completion)
 }
 
 export type OptionState = 'normal' | 'discarded';

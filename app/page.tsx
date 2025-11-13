@@ -61,6 +61,18 @@ export default function Home() {
       return;
     }
 
+    // Validate username length
+    if (username.trim().length > 30) {
+      setError('Username must be 30 characters or less');
+      return;
+    }
+
+    // Validate room name length
+    if (roomName.trim().length > 30) {
+      setError('Room name must be 30 characters or less');
+      return;
+    }
+
     const options = optionsText
       .split('\n')
       .map(line => line.trim())
@@ -71,9 +83,21 @@ export default function Home() {
       return;
     }
 
+    if (options.length > 50) {
+      setError('Maximum 50 options allowed');
+      return;
+    }
+
+    // Validate each option line length
+    const invalidOption = options.find(opt => opt.length > 30);
+    if (invalidOption) {
+      setError(`Option "${invalidOption.substring(0, 20)}..." exceeds 30 characters`);
+      return;
+    }
+
     setError('');
     setIsLoading(true);
-    socket?.emit('createRoom', { roomName, username, options });
+    socket?.emit('createRoom', { roomName: roomName.trim(), username: username.trim(), options });
   };
 
   const handleJoinRoom = () => {
@@ -82,9 +106,15 @@ export default function Home() {
       return;
     }
 
+    // Validate username length
+    if (username.trim().length > 30) {
+      setError('Username must be 30 characters or less');
+      return;
+    }
+
     setError('');
     setIsLoading(true);
-    socket?.emit('joinRoom', { roomId: roomCode, username });
+    socket?.emit('joinRoom', { roomId: roomCode, username: username.trim() });
   };
 
   return (
@@ -149,7 +179,11 @@ export default function Home() {
                   placeholder="Enter your name"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
+                  maxLength={30}
                 />
+                <p className="text-xs text-muted-foreground">
+                  {username.length}/30 characters
+                </p>
               </div>
 
               <div className="space-y-2">
@@ -159,7 +193,11 @@ export default function Home() {
                   placeholder="e.g., TV Series Game"
                   value={roomName}
                   onChange={(e) => setRoomName(e.target.value)}
+                  maxLength={30}
                 />
+                <p className="text-xs text-muted-foreground">
+                  {roomName.length}/30 characters
+                </p>
               </div>
 
               <div className="space-y-2">
@@ -173,7 +211,7 @@ export default function Home() {
                   className="font-mono text-sm"
                 />
                 <p className="text-xs text-muted-foreground">
-                  Add at least 2 options, one per line
+                  Add at least 2 options (max 50), one per line. Each option max 30 characters.
                 </p>
               </div>
 
@@ -220,7 +258,11 @@ export default function Home() {
                   placeholder="Enter your name"
                   value={username}
                   onChange={(e) => setUsername(e.target.value)}
+                  maxLength={30}
                 />
+                <p className="text-xs text-muted-foreground">
+                  {username.length}/30 characters
+                </p>
               </div>
 
               <div className="space-y-2">

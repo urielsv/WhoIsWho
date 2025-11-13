@@ -4,7 +4,7 @@ import next from 'next';
 
 const dev = process.env.NODE_ENV !== 'production';
 const hostname = process.env.HOSTNAME || 'localhost';
-const DEFAULT_PORT = 3000;
+const DEFAULT_PORT = 3030;
 
 function parsePort(value) {
   if (!value) {
@@ -92,19 +92,61 @@ app.prepare().then(() => {
     console.log('Client connected:', socket.id);
     
     socket.on('createRoom', ({ roomName, username, options }) => {
+      // Validate username
+      if (!username || typeof username !== 'string' || username.trim().length === 0) {
+        socket.emit('error', { message: 'Username is required' });
+        return;
+      }
+      if (username.trim().length > 30) {
+        socket.emit('error', { message: 'Username must be 30 characters or less' });
+        return;
+      }
+      
+      // Validate room name
+      if (!roomName || typeof roomName !== 'string' || roomName.trim().length === 0) {
+        socket.emit('error', { message: 'Room name is required' });
+        return;
+      }
+      if (roomName.trim().length > 30) {
+        socket.emit('error', { message: 'Room name must be 30 characters or less' });
+        return;
+      }
+      
+      // Validate options
+      if (!options || !Array.isArray(options) || options.length < 2) {
+        socket.emit('error', { message: 'At least 2 options are required' });
+        return;
+      }
+      if (options.length > 50) {
+        socket.emit('error', { message: 'Maximum 50 options allowed' });
+        return;
+      }
+      
+      // Validate each option text length
+      for (const optionText of options) {
+        if (typeof optionText !== 'string' || optionText.trim().length === 0) {
+          socket.emit('error', { message: 'All options must be non-empty strings' });
+          return;
+        }
+        if (optionText.trim().length > 30) {
+          socket.emit('error', { message: `Option "${optionText.substring(0, 20)}..." exceeds 30 characters` });
+          return;
+        }
+      }
+      
       const roomId = generateId();
       const playerId = socket.id;
       
       const player = {
         id: playerId,
-        username,
+        username: username.trim(),
         isAdmin: true,
         isReady: false,
       };
       
       const gameOptions = options.map((text, index) => ({
         id: `opt-${index}`,
-        text,
+        text: text.trim(),
         eliminated: false,
       }));
       
@@ -144,6 +186,16 @@ app.prepare().then(() => {
     });
     
     socket.on('joinRoom', ({ roomId, username }) => {
+      // Validate username
+      if (!username || typeof username !== 'string' || username.trim().length === 0) {
+        socket.emit('error', { message: 'Username is required' });
+        return;
+      }
+      if (username.trim().length > 30) {
+        socket.emit('error', { message: 'Username must be 30 characters or less' });
+        return;
+      }
+      
       // Normalize roomId to uppercase for case-insensitive lookup
       const normalizedRoomId = normalizeRoomId(roomId);
       const room = rooms.get(normalizedRoomId);
@@ -158,9 +210,15 @@ app.prepare().then(() => {
         return;
       }
       
+      // Validate max players (4)
+      if (room.players.length >= 4) {
+        socket.emit('error', { message: 'Room is full (maximum 4 players)' });
+        return;
+      }
+      
       const player = {
         id: socket.id,
-        username,
+        username: username.trim(),
         isAdmin: false,
         isReady: false,
       };
@@ -246,7 +304,8 @@ app.prepare().then(() => {
         player.hasFinished = false;
         player.guessedOptionId = null;
         player.notes = '';
-        player.guesses = {}; // Per-player guesses: { targetPlayerId: optionId }
+        player.guesses = {}; // Per-board final guesses: { targetPlayerId: optionId }
+        player.boardStatus = {}; // Per-board status: { targetPlayerId: 'guessed' | 'gaveUp' | null }
       }
       
       // Send secret assignments and initial boards to each player
@@ -378,17 +437,29 @@ app.prepare().then(() => {
       });
     });
     
-    socket.on('makeGuessForPlayer', ({ roomId, targetPlayerId, optionId }) => {
+    socket.on('makeGuessForPlayer', ({ roomId, targetPlayerId, optionId, confirmation }) => {
       const normalizedRoomId = normalizeRoomId(roomId);
       const room = rooms.get(normalizedRoomId);
       if (!room) return;
       
       const player = room.players.find(p => p.id === socket.id);
-      if (!player || player.hasFinished) return;
+      if (!player) return;
       
       // Don't allow guessing for yourself
       if (targetPlayerId === socket.id) {
         socket.emit('error', { message: "You can't guess your own option" });
+        return;
+      }
+      
+      // Check if this board is already finished
+      if (player.boardStatus && player.boardStatus[targetPlayerId]) {
+        socket.emit('error', { message: 'This board is already finished' });
+        return;
+      }
+      
+      // Require confirmation for final guess
+      if (confirmation !== 'CONFIRMED') {
+        socket.emit('error', { message: 'Confirmation required for final guess' });
         return;
       }
       
@@ -406,24 +477,94 @@ app.prepare().then(() => {
         return;
       }
       
-      // Store the guess
+      // Store the final guess for this board
       if (!player.guesses) {
         player.guesses = {};
       }
+      if (!player.boardStatus) {
+        player.boardStatus = {};
+      }
       player.guesses[targetPlayerId] = optionId;
+      player.boardStatus[targetPlayerId] = 'guessed';
       
-      // Broadcast to room (so others can see you made a guess, but not what it is)
-      io.to(normalizedRoomId).emit('playerMadeGuess', {
+      // Broadcast to room (so others can see you finished this board)
+      io.to(normalizedRoomId).emit('boardFinished', {
         playerId: socket.id,
         playerName: player.username,
         targetPlayerId,
-        targetPlayerName: targetPlayer.username
+        targetPlayerName: targetPlayer.username,
+        status: 'guessed'
       });
+      
+      // Check if player has finished all boards
+      checkPlayerFinished(player, room, normalizedRoomId, io);
       
       // Confirm to the player who made the guess
       socket.emit('guessConfirmed', {
         targetPlayerId,
         optionId
+      });
+      
+      io.to(normalizedRoomId).emit('roomUpdate', {
+        players: room.players,
+        options: room.options,
+        gamePhase: room.gamePhase,
+        currentTurnPlayerId: room.currentTurnPlayerId,
+        roomName: room.name,
+      });
+    });
+    
+    socket.on('giveUpOnBoard', ({ roomId, targetPlayerId }) => {
+      const normalizedRoomId = normalizeRoomId(roomId);
+      const room = rooms.get(normalizedRoomId);
+      if (!room) return;
+      
+      const player = room.players.find(p => p.id === socket.id);
+      if (!player) return;
+      
+      // Don't allow giving up on yourself
+      if (targetPlayerId === socket.id) {
+        socket.emit('error', { message: "You can't give up on your own board" });
+        return;
+      }
+      
+      // Check if this board is already finished
+      if (player.boardStatus && player.boardStatus[targetPlayerId]) {
+        socket.emit('error', { message: 'This board is already finished' });
+        return;
+      }
+      
+      // Validate target player exists
+      const targetPlayer = room.players.find(p => p.id === targetPlayerId);
+      if (!targetPlayer) {
+        socket.emit('error', { message: 'Target player not found' });
+        return;
+      }
+      
+      // Mark this board as given up
+      if (!player.boardStatus) {
+        player.boardStatus = {};
+      }
+      player.boardStatus[targetPlayerId] = 'gaveUp';
+      
+      // Broadcast to room
+      io.to(normalizedRoomId).emit('boardFinished', {
+        playerId: socket.id,
+        playerName: player.username,
+        targetPlayerId,
+        targetPlayerName: targetPlayer.username,
+        status: 'gaveUp'
+      });
+      
+      // Check if player has finished all boards
+      checkPlayerFinished(player, room, normalizedRoomId, io);
+      
+      io.to(normalizedRoomId).emit('roomUpdate', {
+        players: room.players,
+        options: room.options,
+        gamePhase: room.gamePhase,
+        currentTurnPlayerId: room.currentTurnPlayerId,
+        roomName: room.name,
       });
     });
     
@@ -495,78 +636,24 @@ app.prepare().then(() => {
       checkGameEnd(room, normalizedRoomId, io);
     });
     
-    socket.on('makeGuess', ({ roomId, optionId, confirmation }) => {
-      const normalizedRoomId = normalizeRoomId(roomId);
-      const room = rooms.get(normalizedRoomId);
-      if (!room) return;
+    // Helper function to check if a player has finished all their boards
+    function checkPlayerFinished(player, room, normalizedRoomId, io) {
+      const otherPlayers = room.players.filter(p => p.id !== player.id);
+      const allBoardsFinished = otherPlayers.every(targetPlayer => {
+        return player.boardStatus && player.boardStatus[targetPlayer.id];
+      });
       
-      const player = room.players.find(p => p.id === socket.id);
-      if (!player) return;
-      
-      if (player.hasFinished) {
-        socket.emit('error', { message: 'You have already finished' });
-        return;
+      if (allBoardsFinished && !player.hasFinished) {
+        player.hasFinished = true;
+        io.to(normalizedRoomId).emit('playerFinishedAllBoards', {
+          playerId: player.id,
+          playerName: player.username
+        });
+        
+        // Check if all players finished
+        checkGameEnd(room, normalizedRoomId, io);
       }
-      
-      // Require confirmation step
-      if (confirmation !== 'CONFIRMED') {
-        socket.emit('error', { message: 'Confirmation required' });
-        return;
-      }
-      
-      player.hasFinished = true;
-      player.guessedOptionId = optionId;
-      
-      io.to(normalizedRoomId).emit('playerGuessed', {
-        playerId: socket.id,
-        playerName: player.username,
-        optionId
-      });
-      
-      io.to(normalizedRoomId).emit('roomUpdate', {
-        players: room.players,
-        options: room.options,
-        gamePhase: room.gamePhase,
-        currentTurnPlayerId: room.currentTurnPlayerId,
-        roomName: room.name,
-      });
-      
-      // Check if all players finished
-      checkGameEnd(room, normalizedRoomId, io);
-    });
-    
-    socket.on('giveUp', ({ roomId }) => {
-      const normalizedRoomId = normalizeRoomId(roomId);
-      const room = rooms.get(normalizedRoomId);
-      if (!room) return;
-      
-      const player = room.players.find(p => p.id === socket.id);
-      if (!player) return;
-      
-      if (player.hasFinished) {
-        socket.emit('error', { message: 'You have already finished' });
-        return;
-      }
-      
-      player.hasFinished = true;
-      player.guessedOptionId = null;
-      
-      io.to(normalizedRoomId).emit('playerGaveUp', {
-        playerId: socket.id,
-        playerName: player.username
-      });
-      
-      io.to(normalizedRoomId).emit('roomUpdate', {
-        players: room.players,
-        options: room.options,
-        gamePhase: room.gamePhase,
-        currentTurnPlayerId: room.currentTurnPlayerId,
-        roomName: room.name,
-      });
-      
-      // Check if all players finished
-      checkGameEnd(room, normalizedRoomId, io);
-    });
+    }
     
     socket.on('updateNotes', ({ roomId, notes }) => {
       const normalizedRoomId = normalizeRoomId(roomId);
@@ -604,32 +691,49 @@ app.prepare().then(() => {
       if (allFinished) {
         room.gamePhase = 'finished';
         
-        // Build game results with revealed secrets
-        const gameResults = room.players.map(player => {
-          const actualSecretId = room.secretAssignments[player.id];
-          const actualSecret = room.options.find(o => o.id === actualSecretId);
-          const guessedOption = player.guessedOptionId 
-            ? room.options.find(o => o.id === player.guessedOptionId)
-            : null;
-          const isCorrect = player.guessedOptionId === actualSecretId;
-          
-          return {
-            playerId: player.id,
-            playerName: player.username,
-            actualSecretId,
-            actualSecretText: actualSecret?.text || 'Unknown',
-            guessedOptionId: player.guessedOptionId,
-            guessedOptionText: guessedOption?.text || null,
-            isCorrect,
-            gaveUp: !player.guessedOptionId
-          };
-        });
+        // Build game results - for each player, show their guesses for each other player
+        const gameResults = [];
         
-        const winners = gameResults.filter(r => r.isCorrect);
+        for (const player of room.players) {
+          for (const targetPlayer of room.players) {
+            if (targetPlayer.id === player.id) continue; // Skip self
+            
+            const actualSecretId = room.secretAssignments[targetPlayer.id];
+            const actualSecret = room.options.find(o => o.id === actualSecretId);
+            const guessedOptionId = player.guesses?.[targetPlayer.id] || null;
+            const guessedOption = guessedOptionId 
+              ? room.options.find(o => o.id === guessedOptionId)
+              : null;
+            const isCorrect = guessedOptionId === actualSecretId;
+            const boardStatus = player.boardStatus?.[targetPlayer.id] || null;
+            
+            gameResults.push({
+              playerId: player.id,
+              playerName: player.username,
+              targetPlayerId: targetPlayer.id,
+              targetPlayerName: targetPlayer.username,
+              actualSecretId,
+              actualSecretText: actualSecret?.text || 'Unknown',
+              guessedOptionId,
+              guessedOptionText: guessedOption?.text || null,
+              isCorrect,
+              gaveUp: boardStatus === 'gaveUp',
+              status: boardStatus
+            });
+          }
+        }
+        
+        // Calculate stats
+        const totalGuesses = gameResults.filter(r => r.status === 'guessed').length;
+        const correctGuesses = gameResults.filter(r => r.isCorrect).length;
+        const gaveUp = gameResults.filter(r => r.gaveUp).length;
+        
         const stats = {
           totalPlayers: room.players.length,
-          correctGuesses: winners.length,
-          gaveUp: gameResults.filter(r => r.gaveUp).length
+          totalBoards: gameResults.length,
+          totalGuesses,
+          correctGuesses,
+          gaveUp
         };
         
         io.to(normalizedRoomId).emit('gameFinished', {
@@ -666,6 +770,11 @@ app.prepare().then(() => {
         return;
       }
       
+      if (roomName.trim().length > 30) {
+        socket.emit('error', { message: 'Room name must be 30 characters or less' });
+        return;
+      }
+      
       room.name = roomName.trim();
       
       io.to(normalizedRoomId).emit('roomUpdate', {
@@ -698,6 +807,17 @@ app.prepare().then(() => {
       
       if (!optionText || optionText.trim().length === 0) {
         socket.emit('error', { message: 'Option text cannot be empty' });
+        return;
+      }
+      
+      if (optionText.trim().length > 30) {
+        socket.emit('error', { message: 'Option text must be 30 characters or less' });
+        return;
+      }
+      
+      // Validate max options (50)
+      if (room.options.length >= 50) {
+        socket.emit('error', { message: 'Maximum 50 options allowed' });
         return;
       }
       
