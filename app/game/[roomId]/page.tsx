@@ -168,6 +168,10 @@ export default function GamePage() {
     }
   };
 
+  const handleNextTurn = () => {
+    socket?.emit('nextTurn', { roomId });
+  };
+
   const handleGiveUp = () => {
     if (confirm('Are you sure you want to give up? You will be marked as finished.')) {
       socket?.emit('giveUp', { roomId });
