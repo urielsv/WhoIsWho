@@ -28,18 +28,18 @@ export default function GamePage() {
     mySecretOption,
     lastQuestion,
     myNotes,
+    myGuesses,
     setPlayers,
     setOptions,
     setGamePhase,
     setCurrentTurnPlayerId,
     setLastQuestion,
     setMyNotes,
+    addGuess,
   } = useGameStore();
 
   const [showGuessModal, setShowGuessModal] = useState(false);
-  const [guessOptionId, setGuessOptionId] = useState<string | null>(null);
-  const [guessStep, setGuessStep] = useState(1);
-  const [showPlayerSelect, setShowPlayerSelect] = useState<string | null>(null);
+  const [guessTargetPlayerId, setGuessTargetPlayerId] = useState<string | null>(null); // Which player we're guessing for
   const [showHelp, setShowHelp] = useState(false);
   const [selectedPlayerView, setSelectedPlayerView] = useState<string | null>(null); // Which player's board to view
   const [bulkSelectMode, setBulkSelectMode] = useState(false);
@@ -52,9 +52,9 @@ export default function GamePage() {
   const remainingOptions = options.filter(o => !o.eliminated);
   const hasFinished = myPlayer?.hasFinished || false;
   
-  // Active players for ping-pong
+  // Active players for asks/responds
   const activePlayers = players.filter(p => !p.hasFinished);
-  const pingPongPlayers = activePlayers.slice(0, 2);
+  const asksRespondsPlayers = activePlayers.slice(0, 2);
 
   useEffect(() => {
     if (!socket || !playerId) {
@@ -155,37 +155,15 @@ export default function GamePage() {
       return;
     }
 
-    // If option is in 'possibleGuess' state, show guess modal
-    if (option.state === 'possibleGuess') {
-      setGuessOptionId(optionId);
-      setShowGuessModal(true);
-      setGuessStep(1);
-      return;
-    }
-
-    // If option is 'normal', show player selection for discarding
-    if (!option.state || option.state === 'normal') {
-      setShowPlayerSelect(optionId);
-      return;
-    }
-
-    // If discarded, cycle back to normal (easy undo)
-    if (option.state === 'discarded') {
-      socket?.emit('cycleOptionState', { 
-        roomId, 
-        optionId,
-        targetPlayerId: option.discardedForPlayerId || playerId
-      });
-    }
-  };
-
-  const handleDiscardForPlayer = (optionId: string, targetPlayerId: string) => {
+    // Simple toggle: click to discard/undiscard for the currently viewed player
+    // This automatically discards for the player whose board we're viewing
+    const targetPlayerId = selectedPlayerView || playerId;
+    
     socket?.emit('cycleOptionState', { 
       roomId, 
       optionId,
       targetPlayerId
     });
-    setShowPlayerSelect(null);
   };
 
   const handleBulkDiscard = (targetPlayerId: string) => {
@@ -199,29 +177,31 @@ export default function GamePage() {
     setBulkSelectMode(false);
   };
 
-  const handleMarkAsPossibleGuess = (optionId: string) => {
-    socket?.emit('markAsPossibleGuess', { roomId, optionId });
+  const handleMakeGuessForPlayer = (targetPlayerId: string) => {
+    // Don't allow guessing for yourself
+    if (targetPlayerId === playerId) {
+      alert("You can't guess your own option!");
+      return;
+    }
+    setGuessTargetPlayerId(targetPlayerId);
+    setShowGuessModal(true);
   };
 
-  const handleNextGuessStep = () => {
-    if (guessStep === 1) {
-      setGuessStep(2);
-    } else if (guessStep === 2) {
-      setGuessStep(3);
-    }
-  };
-
-  const confirmGuess = () => {
-    if (guessOptionId && guessStep === 3) {
-      socket?.emit('makeGuess', { 
-        roomId, 
-        optionId: guessOptionId,
-        confirmation: 'CONFIRMED'
-      });
-      setShowGuessModal(false);
-      setGuessOptionId(null);
-      setGuessStep(1);
-    }
+  const handleSelectGuessOption = (optionId: string) => {
+    if (!guessTargetPlayerId) return;
+    
+    // Save guess locally
+    addGuess(guessTargetPlayerId, optionId);
+    
+    // Send to server
+    socket?.emit('makeGuessForPlayer', { 
+      roomId, 
+      targetPlayerId: guessTargetPlayerId,
+      optionId
+    });
+    
+    setShowGuessModal(false);
+    setGuessTargetPlayerId(null);
   };
 
   const handleGiveUp = () => {
@@ -239,23 +219,17 @@ export default function GamePage() {
     switch (state) {
       case 'discarded':
         return 'bg-gray-300 dark:bg-gray-700 opacity-60';
-      case 'possibleGuess':
-        return 'bg-green-200 dark:bg-green-900 border-green-500 ring-2 ring-green-500';
       default:
         return 'bg-card border-border';
     }
   };
 
   const getOptionStateLabel = (state: OptionState | undefined, discardedForPlayerId?: string) => {
-    switch (state) {
-      case 'discarded':
-        const player = players.find(p => p.id === discardedForPlayerId);
-        return player ? `Discarded for ${player.username}` : 'Discarded';
-      case 'possibleGuess':
-        return 'Possible Guess';
-      default:
-        return '';
+    if (state === 'discarded') {
+      const player = players.find(p => p.id === discardedForPlayerId);
+      return player ? `Discarded for ${player.username}` : 'Discarded';
     }
+    return '';
   };
 
   if (gamePhase === 'finished') {
@@ -314,9 +288,9 @@ export default function GamePage() {
             <Badge variant="secondary" className="text-lg px-4 py-1">
               {gamePhase === 'question' ? 'Question Phase' : 'Elimination Phase'}
             </Badge>
-            {pingPongPlayers.length >= 2 && (
+            {asksRespondsPlayers.length >= 2 && (
               <Badge variant="outline" className="text-sm">
-                Ping-Pong: {pingPongPlayers.map(p => p.username).join(' ↔ ')}
+                Asks ↔ Responds: {asksRespondsPlayers.map(p => p.username).join(' ↔ ')}
               </Badge>
             )}
           </div>
@@ -332,17 +306,17 @@ export default function GamePage() {
             </CardHeader>
             <CardContent className="space-y-3 text-sm">
               <div>
-                <strong className="text-blue-900 dark:text-blue-100">Ping-Pong Style:</strong>
+                <strong className="text-blue-900 dark:text-blue-100">Asks ↔ Responds Style:</strong>
                 <p className="text-muted-foreground mt-1">
-                  Two players alternate asking questions quickly. No waiting for elimination phase - discard options anytime!
+                  Two players alternate asking and responding to questions quickly. No waiting for elimination phase - discard options anytime!
                 </p>
               </div>
               <div>
                 <strong className="text-blue-900 dark:text-blue-100">Quick Discard:</strong>
                 <ul className="list-disc list-inside mt-1 space-y-1 text-muted-foreground">
-                  <li><strong>Click normal option:</strong> Choose which player to discard for</li>
-                  <li><strong>Click discarded option:</strong> Undo (back to normal)</li>
-                  <li><strong>Right-click or long-press:</strong> Mark as possible guess</li>
+                  <li><strong>Click option:</strong> Toggle discard for the player whose board you're viewing</li>
+                  <li><strong>Click again:</strong> Undo discard (back to normal)</li>
+                  <li><strong>Switch boards:</strong> Use the player buttons to view different player boards</li>
                 </ul>
               </div>
               <div>
@@ -354,7 +328,13 @@ export default function GamePage() {
               <div>
                 <strong className="text-blue-900 dark:text-blue-100">Player Boards:</strong>
                 <p className="text-muted-foreground mt-1">
-                  Use the carousel to view different player boards and see what each player has discarded.
+                  Click player buttons to switch between boards. When viewing a player's board, clicking options will discard them for THAT player.
+                </p>
+              </div>
+              <div>
+                <strong className="text-blue-900 dark:text-blue-100">Making Guesses:</strong>
+                <p className="text-muted-foreground mt-1">
+                  Use the "Make Guess" buttons to guess which option belongs to each player. You can make one guess per player.
                 </p>
               </div>
             </CardContent>
@@ -461,9 +441,22 @@ export default function GamePage() {
 
                 {/* Options Grid for Selected Player */}
                 <div className="space-y-4">
-                  <div className="p-2 bg-secondary rounded text-sm text-center">
-                    Viewing board for: <strong>{players.find(p => p.id === selectedPlayerView)?.username}</strong>
-                    {selectedPlayerView === playerId && ' (Your Board)'}
+                  <div className="flex items-center justify-between p-2 bg-secondary rounded">
+                    <div className="text-sm">
+                      Viewing board for: <strong>{players.find(p => p.id === selectedPlayerView)?.username}</strong>
+                      {selectedPlayerView === playerId && ' (Your Board)'}
+                    </div>
+                    {selectedPlayerView && selectedPlayerView !== playerId && !hasFinished && (
+                      <Button
+                        onClick={() => handleMakeGuessForPlayer(selectedPlayerView)}
+                        size="sm"
+                        variant={myGuesses[selectedPlayerView] ? "outline" : "default"}
+                        className={myGuesses[selectedPlayerView] ? "border-green-500 text-green-700 dark:text-green-400" : ""}
+                      >
+                        <Star className="w-3 h-3 mr-1" />
+                        {myGuesses[selectedPlayerView] ? 'Change Guess' : `Make Guess for ${players.find(p => p.id === selectedPlayerView)?.username}`}
+                      </Button>
+                    )}
                   </div>
                   <div className="grid sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
                     {options.map((option) => {
@@ -471,9 +464,10 @@ export default function GamePage() {
                       const isBulkSelected = bulkSelectedOptions.has(option.id);
                       const isViewingMyBoard = selectedPlayerView === playerId;
                       const isDiscardedForThisPlayer = option.discardedForPlayerId === selectedPlayerView;
+                      const isGuessedForViewedPlayer = myGuesses[selectedPlayerView || ''] === option.id;
                       
                       // Show all options when viewing own board, or show options relevant to selected player
-                      const shouldShow = isViewingMyBoard || isDiscardedForThisPlayer || !option.state || option.state === 'normal' || option.state === 'possibleGuess';
+                      const shouldShow = isViewingMyBoard || isDiscardedForThisPlayer || !option.state || option.state === 'normal';
                       
                       if (!shouldShow) return null;
                       
@@ -481,12 +475,6 @@ export default function GamePage() {
                         <button
                           key={option.id}
                           onClick={() => handleOptionClick(option.id)}
-                          onContextMenu={(e) => {
-                            e.preventDefault();
-                            if (!hasFinished && !option.eliminated) {
-                              handleMarkAsPossibleGuess(option.id);
-                            }
-                          }}
                           disabled={option.eliminated || hasFinished}
                           className={cn(
                             "p-3 rounded-lg border-2 text-left transition-all relative",
@@ -495,7 +483,8 @@ export default function GamePage() {
                             getOptionStateColor(option.state),
                             option.id === mySecretOption && !option.eliminated && isViewingMyBoard && "ring-2 ring-yellow-500",
                             isBulkSelected && "ring-4 ring-blue-500 border-blue-500",
-                            isDiscardedForThisPlayer && !isViewingMyBoard && "border-blue-300 dark:border-blue-700"
+                            isDiscardedForThisPlayer && !isViewingMyBoard && "border-blue-300 dark:border-blue-700",
+                            isGuessedForViewedPlayer && "ring-2 ring-green-500 bg-green-50 dark:bg-green-950"
                           )}
                         >
                           <div className="font-medium text-sm break-words">
@@ -506,11 +495,13 @@ export default function GamePage() {
                               Your Secret
                             </Badge>
                           )}
+                          {isGuessedForViewedPlayer && (
+                            <Badge variant="default" className="mt-1 text-xs bg-green-600">
+                              Your Guess
+                            </Badge>
+                          )}
                           {stateLabel && (
-                            <Badge 
-                              variant={option.state === 'possibleGuess' ? 'default' : 'outline'} 
-                              className="mt-1 text-xs"
-                            >
+                            <Badge variant="outline" className="mt-1 text-xs">
                               {stateLabel}
                             </Badge>
                           )}
@@ -565,7 +556,7 @@ export default function GamePage() {
                         Give Up
                       </Button>
                       <p className="text-xs text-muted-foreground self-center">
-                        💡 Tip: Right-click options to mark as possible guess
+                        💡 Tip: Switch player boards to make guesses for each player
                       </p>
                     </div>
                   )}
@@ -626,15 +617,15 @@ export default function GamePage() {
                         "p-2 rounded text-sm flex items-center justify-between",
                         player.id === currentTurnPlayerId ? "bg-primary text-primary-foreground" : "bg-secondary",
                         player.hasFinished && "opacity-60",
-                        pingPongPlayers.some(p => p.id === player.id) && "ring-2 ring-blue-500"
+                        asksRespondsPlayers.some(p => p.id === player.id) && "ring-2 ring-blue-500"
                       )}
                     >
                       <div className="flex items-center gap-2">
                         <User className="w-4 h-4" />
                         {player.username}
                         {player.id === currentTurnPlayerId && " (Current)"}
-                        {pingPongPlayers.some(p => p.id === player.id) && (
-                          <Badge variant="outline" className="text-xs">Ping-Pong</Badge>
+                        {asksRespondsPlayers.some(p => p.id === player.id) && (
+                          <Badge variant="outline" className="text-xs">Asking</Badge>
                         )}
                       </div>
                       {player.hasFinished && (
@@ -651,119 +642,58 @@ export default function GamePage() {
         </div>
       </div>
 
-      {/* Player Selection Modal */}
-      {showPlayerSelect && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <Card className="w-full max-w-md m-4">
+      {/* Guess Selection Modal */}
+      {showGuessModal && guessTargetPlayerId && (
+        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50 p-4">
+          <Card className="w-full max-w-2xl max-h-[80vh] overflow-y-auto">
             <CardHeader>
-              <CardTitle>Discard for Which Player?</CardTitle>
-              <CardDescription>
-                Select which player this option should be marked as discarded for
-              </CardDescription>
-            </CardHeader>
-            <CardContent className="space-y-2">
-              {players.map((player) => (
+              <div className="flex items-center justify-between">
+                <div>
+                  <CardTitle>
+                    Make Guess for {players.find(p => p.id === guessTargetPlayerId)?.username}
+                  </CardTitle>
+                  <CardDescription>
+                    Select which option you think belongs to this player
+                  </CardDescription>
+                </div>
                 <Button
-                  key={player.id}
-                  onClick={() => handleDiscardForPlayer(showPlayerSelect, player.id)}
-                  variant="outline"
-                  className="w-full justify-start"
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => {
+                    setShowGuessModal(false);
+                    setGuessTargetPlayerId(null);
+                  }}
                 >
-                  <User className="w-4 h-4 mr-2" />
-                  {player.username}
-                  {player.id === playerId && ' (You)'}
+                  <X className="w-4 h-4" />
                 </Button>
-              ))}
-              <Button
-                onClick={() => setShowPlayerSelect(null)}
-                variant="ghost"
-                className="w-full mt-2"
-              >
-                Cancel
-              </Button>
-            </CardContent>
-          </Card>
-        </div>
-      )}
-
-      {/* Multi-Step Guess Confirmation Modal */}
-      {showGuessModal && guessOptionId && (
-        <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50">
-          <Card className="w-full max-w-md m-4">
-            <CardHeader>
-              <CardTitle>
-                Confirm Your Guess {guessStep > 1 && `(Step ${guessStep}/3)`}
-              </CardTitle>
+              </div>
             </CardHeader>
-            <CardContent className="space-y-4">
-              {guessStep === 1 && (
-                <>
-                  <div className="p-4 bg-yellow-500/10 border border-yellow-500 rounded-lg">
-                    <p className="font-medium mb-2">You are about to guess:</p>
-                    <p className="text-lg">{options.find(o => o.id === guessOptionId)?.text}</p>
-                  </div>
-                  <p className="text-sm text-muted-foreground">
-                    This is your first confirmation. You'll need to confirm 2 more times to finalize your guess.
-                  </p>
-                  <Button onClick={handleNextGuessStep} className="w-full">
-                    Continue to Step 2
-                  </Button>
-                </>
-              )}
-              
-              {guessStep === 2 && (
-                <>
-                  <div className="p-4 bg-orange-500/10 border border-orange-500 rounded-lg">
-                    <p className="font-medium mb-2">Second Confirmation:</p>
-                    <p className="text-lg">{options.find(o => o.id === guessOptionId)?.text}</p>
-                  </div>
-                  <p className="text-sm text-muted-foreground">
-                    Are you sure this is your final guess? One more confirmation required.
-                  </p>
-                  <div className="flex gap-2">
-                    <Button onClick={handleNextGuessStep} className="flex-1">
-                      Continue to Final Step
-                    </Button>
-                    <Button 
-                      onClick={() => {
-                        setShowGuessModal(false);
-                        setGuessStep(1);
-                      }} 
-                      variant="outline" 
-                      className="flex-1"
+            <CardContent>
+              <div className="grid sm:grid-cols-2 md:grid-cols-3 gap-2">
+                {options.filter(o => !o.eliminated).map((option) => {
+                  const isCurrentGuess = myGuesses[guessTargetPlayerId] === option.id;
+                  return (
+                    <button
+                      key={option.id}
+                      onClick={() => handleSelectGuessOption(option.id)}
+                      className={cn(
+                        "p-3 rounded-lg border-2 text-left transition-all",
+                        "hover:border-primary cursor-pointer",
+                        isCurrentGuess && "ring-2 ring-green-500 bg-green-50 dark:bg-green-950 border-green-500"
+                      )}
                     >
-                      Cancel
-                    </Button>
-                  </div>
-                </>
-              )}
-              
-              {guessStep === 3 && (
-                <>
-                  <div className="p-4 bg-red-500/10 border border-red-500 rounded-lg">
-                    <p className="font-medium mb-2">FINAL CONFIRMATION:</p>
-                    <p className="text-lg font-bold">{options.find(o => o.id === guessOptionId)?.text}</p>
-                  </div>
-                  <p className="text-sm text-muted-foreground">
-                    This is your final chance to change your mind. Once confirmed, you cannot undo this guess.
-                  </p>
-                  <div className="flex gap-2">
-                    <Button onClick={confirmGuess} variant="destructive" className="flex-1">
-                      Yes, Finalize My Guess
-                    </Button>
-                    <Button 
-                      onClick={() => {
-                        setShowGuessModal(false);
-                        setGuessStep(1);
-                      }} 
-                      variant="outline" 
-                      className="flex-1"
-                    >
-                      Cancel
-                    </Button>
-                  </div>
-                </>
-              )}
+                      <div className="font-medium text-sm break-words">
+                        {option.text}
+                      </div>
+                      {isCurrentGuess && (
+                        <Badge variant="default" className="mt-1 text-xs bg-green-600">
+                          Current Guess
+                        </Badge>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
             </CardContent>
           </Card>
         </div>

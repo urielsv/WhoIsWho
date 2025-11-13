@@ -6,9 +6,10 @@ export interface Player {
   hasFinished?: boolean;
   guessedOptionId?: string | null;
   notes?: string;
+  guesses?: Record<string, string>; // Map of targetPlayerId -> optionId (one guess per player)
 }
 
-export type OptionState = 'normal' | 'discarded' | 'possibleGuess';
+export type OptionState = 'normal' | 'discarded';
 
 export interface GameOption {
   id: string;

@@ -15,6 +15,7 @@ interface GameState {
   mySecretOption: string | null;
   lastQuestion: string | null;
   myNotes: string;
+  myGuesses: Record<string, string>; // Map of targetPlayerId -> optionId
   
   setRoomInfo: (roomId: string, roomName: string, playerId: string, username: string, isAdmin: boolean) => void;
   setRoomName: (roomName: string) => void;
@@ -26,6 +27,8 @@ interface GameState {
   setMySecretOption: (optionId: string | null) => void;
   setLastQuestion: (question: string | null) => void;
   setMyNotes: (notes: string) => void;
+  setMyGuesses: (guesses: Record<string, string>) => void;
+  addGuess: (targetPlayerId: string, optionId: string) => void;
   reset: () => void;
 }
 
@@ -43,6 +46,7 @@ export const useGameStore = create<GameState>((set) => ({
   mySecretOption: null,
   lastQuestion: null,
   myNotes: '',
+  myGuesses: {},
   
   setRoomInfo: (roomId, roomName, playerId, username, isAdmin) => 
     set({ roomId, roomName, playerId, username, isAdmin }),
@@ -55,6 +59,10 @@ export const useGameStore = create<GameState>((set) => ({
   setMySecretOption: (optionId) => set({ mySecretOption: optionId }),
   setLastQuestion: (question) => set({ lastQuestion: question }),
   setMyNotes: (notes) => set({ myNotes: notes }),
+  setMyGuesses: (guesses) => set({ myGuesses: guesses }),
+  addGuess: (targetPlayerId, optionId) => set((state) => ({
+    myGuesses: { ...state.myGuesses, [targetPlayerId]: optionId }
+  })),
   reset: () => set({
     roomId: null,
     roomName: null,
@@ -69,6 +77,7 @@ export const useGameStore = create<GameState>((set) => ({
     mySecretOption: null,
     lastQuestion: null,
     myNotes: '',
+    myGuesses: {},
   }),
 }));
 
