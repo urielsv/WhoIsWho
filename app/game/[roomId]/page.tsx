@@ -8,7 +8,7 @@ import { Badge } from '@/components/ui/badge';
 import { Textarea } from '@/components/ui/textarea';
 import { useSocket } from '@/lib/socket';
 import { useGameStore } from '@/lib/store';
-import { Trophy, MessageSquare, ArrowRight, CheckCircle, XCircle, HelpCircle, User, ChevronLeft, ChevronRight, Star, X } from 'lucide-react';
+import { Trophy, MessageSquare, ArrowRight, CheckCircle, XCircle, HelpCircle, User, ChevronLeft, ChevronRight, Star, X, Sparkles, Award } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import type { OptionState } from '@/types/game';
 
@@ -44,6 +44,8 @@ export default function GamePage() {
   const [selectedPlayerView, setSelectedPlayerView] = useState<string | null>(null); // Which player's board to view
   const [bulkSelectMode, setBulkSelectMode] = useState(false);
   const [bulkSelectedOptions, setBulkSelectedOptions] = useState<Set<string>>(new Set());
+  const [gameResults, setGameResults] = useState<any[]>([]);
+  const [gameStats, setGameStats] = useState<any>(null);
 
   const isMyTurn = currentTurnPlayerId === playerId;
   const currentPlayer = players.find(p => p.id === currentTurnPlayerId);
@@ -114,8 +116,14 @@ export default function GamePage() {
       // Player gave up
     };
 
-    const handleGameFinished = () => {
-      // Game finished
+    const handleGameFinished = (data: any) => {
+      // Game finished with results
+      if (data?.results) {
+        setGameResults(data.results);
+      }
+      if (data?.stats) {
+        setGameStats(data.stats);
+      }
     };
 
     const handlePairRotated = (data: any) => {
@@ -252,36 +260,171 @@ export default function GamePage() {
   };
 
   if (gamePhase === 'finished') {
+    const winners = gameResults.filter((r: any) => r.isCorrect);
+    const hasWinners = winners.length > 0;
+    
     return (
-      <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 dark:from-gray-900 dark:to-gray-800 flex items-center justify-center p-4">
-        <Card className="w-full max-w-md text-center">
-          <CardHeader>
-            <div className="w-16 h-16 bg-yellow-500 rounded-full flex items-center justify-center mx-auto mb-4">
-              <Trophy className="w-8 h-8 text-white" />
-            </div>
-            <CardTitle className="text-3xl">Game Over!</CardTitle>
-            <CardDescription>All players have finished</CardDescription>
-          </CardHeader>
-          <CardContent className="space-y-4">
-            <div className="space-y-2">
-              {players.map((player) => (
-                <div key={player.id} className="p-2 bg-secondary rounded text-sm">
-                  <div className="font-medium">{player.username}</div>
-                  {player.guessedOptionId ? (
-                    <div className="text-muted-foreground">
-                      Guessed: {options.find(o => o.id === player.guessedOptionId)?.text || 'Unknown'}
-                    </div>
-                  ) : (
-                    <div className="text-muted-foreground">Gave up</div>
-                  )}
+      <div className="min-h-screen bg-gradient-to-br from-purple-50 via-pink-50 to-yellow-50 dark:from-gray-900 dark:via-purple-900 dark:to-pink-900 flex items-center justify-center p-4">
+        <div className="w-full max-w-4xl space-y-6">
+          {/* Header with Celebration */}
+          <Card className="text-center border-4 border-yellow-400 dark:border-yellow-500 shadow-2xl">
+            <CardHeader className="pb-4">
+              <div className="flex items-center justify-center gap-4 mb-4">
+                <div className="w-20 h-20 bg-gradient-to-br from-yellow-400 to-orange-500 rounded-full flex items-center justify-center shadow-lg animate-pulse">
+                  <Trophy className="w-10 h-10 text-white" />
                 </div>
-              ))}
-            </div>
-            <Button onClick={() => router.push('/')} className="w-full">
-              Back to Home
-            </Button>
-          </CardContent>
-        </Card>
+                {hasWinners && (
+                  <div className="w-16 h-16 bg-gradient-to-br from-pink-400 to-red-500 rounded-full flex items-center justify-center shadow-lg animate-bounce">
+                    <Sparkles className="w-8 h-8 text-white" />
+                  </div>
+                )}
+              </div>
+              <CardTitle className="text-5xl font-bold bg-gradient-to-r from-purple-600 to-pink-600 dark:from-purple-400 dark:to-pink-400 bg-clip-text text-transparent">
+                Game Complete! 🎉
+              </CardTitle>
+              <CardDescription className="text-lg mt-2">
+                {hasWinners 
+                  ? `${winners.length} ${winners.length === 1 ? 'Player' : 'Players'} Guessed Correctly!`
+                  : 'Everyone gave their best shot!'}
+              </CardDescription>
+            </CardHeader>
+          </Card>
+
+          {/* Stats Card */}
+          {gameStats && (
+            <Card className="bg-gradient-to-r from-blue-50 to-indigo-50 dark:from-blue-950 dark:to-indigo-950 border-blue-200 dark:border-blue-800">
+              <CardContent className="pt-6">
+                <div className="grid grid-cols-3 gap-4 text-center">
+                  <div>
+                    <div className="text-3xl font-bold text-blue-600 dark:text-blue-400">{gameStats.totalPlayers}</div>
+                    <div className="text-sm text-muted-foreground">Total Players</div>
+                  </div>
+                  <div>
+                    <div className="text-3xl font-bold text-green-600 dark:text-green-400">{gameStats.correctGuesses}</div>
+                    <div className="text-sm text-muted-foreground">Correct Guesses</div>
+                  </div>
+                  <div>
+                    <div className="text-3xl font-bold text-orange-600 dark:text-orange-400">{gameStats.gaveUp}</div>
+                    <div className="text-sm text-muted-foreground">Gave Up</div>
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+          )}
+
+          {/* Results Grid */}
+          <div className="grid md:grid-cols-2 gap-4">
+            {gameResults.map((result: any, index: number) => {
+              const isWinner = result.isCorrect;
+              const isMe = result.playerId === playerId;
+              
+              return (
+                <Card 
+                  key={result.playerId} 
+                  className={cn(
+                    "transition-all duration-300 hover:scale-105",
+                    isWinner && "border-4 border-green-500 dark:border-green-400 bg-gradient-to-br from-green-50 to-emerald-50 dark:from-green-950 dark:to-emerald-950 shadow-xl",
+                    !isWinner && !result.gaveUp && "border-2 border-red-300 dark:border-red-700 bg-gradient-to-br from-red-50 to-pink-50 dark:from-red-950 dark:to-pink-950",
+                    result.gaveUp && "border-2 border-gray-300 dark:border-gray-700 bg-gradient-to-br from-gray-50 to-slate-50 dark:from-gray-950 dark:to-slate-950"
+                  )}
+                  style={{ animationDelay: `${index * 100}ms` }}
+                >
+                  <CardHeader>
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <div className={cn(
+                          "w-10 h-10 rounded-full flex items-center justify-center font-bold text-white",
+                          isWinner && "bg-gradient-to-br from-green-500 to-emerald-600",
+                          !isWinner && !result.gaveUp && "bg-gradient-to-br from-red-500 to-pink-600",
+                          result.gaveUp && "bg-gradient-to-br from-gray-500 to-slate-600"
+                        )}>
+                          {isWinner ? <Award className="w-5 h-5" /> : <User className="w-5 h-5" />}
+                        </div>
+                        <div>
+                          <CardTitle className="text-xl">
+                            {result.playerName}
+                            {isMe && <span className="ml-2 text-sm text-muted-foreground">(You)</span>}
+                          </CardTitle>
+                          {isWinner && (
+                            <Badge className="mt-1 bg-green-500 text-white">
+                              <Star className="w-3 h-3 mr-1" />
+                              Winner!
+                            </Badge>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    {/* Actual Secret - Revealed! */}
+                    <div className="p-3 bg-primary/10 rounded-lg border-2 border-primary/30">
+                      <div className="text-xs font-semibold text-primary mb-1 uppercase tracking-wide">
+                        Actual Secret
+                      </div>
+                      <div className="text-lg font-bold text-primary">
+                        {result.actualSecretText}
+                      </div>
+                    </div>
+
+                    {/* Their Guess */}
+                    {result.gaveUp ? (
+                      <div className="p-3 bg-gray-100 dark:bg-gray-800 rounded-lg border border-gray-300 dark:border-gray-700">
+                        <div className="text-xs font-semibold text-muted-foreground mb-1 uppercase tracking-wide">
+                          Result
+                        </div>
+                        <div className="text-base text-muted-foreground flex items-center gap-2">
+                          <XCircle className="w-4 h-4" />
+                          Gave Up
+                        </div>
+                      </div>
+                    ) : (
+                      <div className={cn(
+                        "p-3 rounded-lg border-2",
+                        isWinner 
+                          ? "bg-green-100 dark:bg-green-900 border-green-400 dark:border-green-600" 
+                          : "bg-red-100 dark:bg-red-900 border-red-400 dark:border-red-600"
+                      )}>
+                        <div className="text-xs font-semibold mb-1 uppercase tracking-wide flex items-center gap-2">
+                          {isWinner ? (
+                            <>
+                              <CheckCircle className="w-4 h-4 text-green-600 dark:text-green-400" />
+                              <span className="text-green-700 dark:text-green-300">Correct Guess!</span>
+                            </>
+                          ) : (
+                            <>
+                              <XCircle className="w-4 h-4 text-red-600 dark:text-red-400" />
+                              <span className="text-red-700 dark:text-red-300">Incorrect Guess</span>
+                            </>
+                          )}
+                        </div>
+                        <div className={cn(
+                          "text-base font-medium",
+                          isWinner ? "text-green-800 dark:text-green-200" : "text-red-800 dark:text-red-200"
+                        )}>
+                          {result.guessedOptionText}
+                        </div>
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              );
+            })}
+          </div>
+
+          {/* Action Button */}
+          <Card>
+            <CardContent className="pt-6">
+              <Button 
+                onClick={() => router.push('/')} 
+                className="w-full text-lg py-6 bg-gradient-to-r from-purple-600 to-pink-600 hover:from-purple-700 hover:to-pink-700 text-white shadow-lg"
+                size="lg"
+              >
+                <Trophy className="w-5 h-5 mr-2" />
+                Play Again
+              </Button>
+            </CardContent>
+          </Card>
+        </div>
       </div>
     );
   }

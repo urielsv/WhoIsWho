@@ -574,7 +574,39 @@ app.prepare().then(() => {
       const allFinished = room.players.every(p => p.hasFinished);
       if (allFinished) {
         room.gamePhase = 'finished';
-        io.to(normalizedRoomId).emit('gameFinished');
+        
+        // Build game results with revealed secrets
+        const gameResults = room.players.map(player => {
+          const actualSecretId = room.secretAssignments[player.id];
+          const actualSecret = room.options.find(o => o.id === actualSecretId);
+          const guessedOption = player.guessedOptionId 
+            ? room.options.find(o => o.id === player.guessedOptionId)
+            : null;
+          const isCorrect = player.guessedOptionId === actualSecretId;
+          
+          return {
+            playerId: player.id,
+            playerName: player.username,
+            actualSecretId,
+            actualSecretText: actualSecret?.text || 'Unknown',
+            guessedOptionId: player.guessedOptionId,
+            guessedOptionText: guessedOption?.text || null,
+            isCorrect,
+            gaveUp: !player.guessedOptionId
+          };
+        });
+        
+        const winners = gameResults.filter(r => r.isCorrect);
+        const stats = {
+          totalPlayers: room.players.length,
+          correctGuesses: winners.length,
+          gaveUp: gameResults.filter(r => r.gaveUp).length
+        };
+        
+        io.to(normalizedRoomId).emit('gameFinished', {
+          results: gameResults,
+          stats
+        });
         io.to(normalizedRoomId).emit('roomUpdate', {
           players: room.players,
           options: room.options,
