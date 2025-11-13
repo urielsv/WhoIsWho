@@ -1,7 +1,10 @@
 # Who's Who - Multiplayer Guessing Game
 
+---> MADE WITH CURSOR !!!
+
 A real-time multiplayer guessing game built with Next.js, Socket.io, and shadcn/ui. Players take turns asking yes/no questions and eliminating options to guess their secret assignments.
 
+**Note:** Created with Cursor AI for casual play with friends over voice chat (Discord, etc.).
 ---
 
 ## 📚 Documentation Quick Links

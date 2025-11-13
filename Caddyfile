@@ -1,0 +1,38 @@
+# Caddy automatically obtains and renews SSL certificates from Let's Encrypt
+{
+    email urielsosavazquez@gmail.com
+}
+
+muchi.org {
+    # Reverse proxy to the app
+    reverse_proxy app:3000 {
+        # WebSocket support for Socket.io
+        header_up X-Real-IP {remote_host}
+        header_up X-Forwarded-For {remote_host}
+        header_up X-Forwarded-Proto {scheme}
+    }
+
+    # Security headers
+    header {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        X-Frame-Options "SAMEORIGIN"
+        X-Content-Type-Options "nosniff"
+        X-XSS-Protection "1; mode=block"
+        Referrer-Policy "strict-origin-when-cross-origin"
+    }
+
+    # Compression
+    encode gzip zstd
+
+    # Logging
+    log {
+        output file /var/log/caddy/access.log
+        format json
+    }
+}
+
+# HTTP to HTTPS redirect (catch-all for any domain)
+:80 {
+    redir https://{host}{uri} permanent
+}
+

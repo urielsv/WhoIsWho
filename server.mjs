@@ -4,7 +4,7 @@ import next from 'next';
 
 const dev = process.env.NODE_ENV !== 'production';
 const hostname = process.env.HOSTNAME || 'localhost';
-const DEFAULT_PORT = 3030;
+const DEFAULT_PORT = 3000;
 
 function parsePort(value) {
   if (!value) {
