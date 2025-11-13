@@ -8,7 +8,9 @@ interface GameState {
   username: string | null;
   isAdmin: boolean;
   players: Player[];
-  options: GameOption[];
+  options: GameOption[]; // Master list for reference
+  // NEW: Each player has private boards for tracking other players
+  myBoards: Record<string, GameOption[]>; // Map of targetPlayerId -> options for that board
   gameStarted: boolean;
   gamePhase: 'lobby' | 'question' | 'elimination' | 'finished';
   currentTurnPlayerId: string | null;
@@ -21,6 +23,8 @@ interface GameState {
   setRoomName: (roomName: string) => void;
   setPlayers: (players: Player[]) => void;
   setOptions: (options: GameOption[]) => void;
+  setMyBoards: (boards: Record<string, GameOption[]>) => void;
+  updateBoard: (targetPlayerId: string, options: GameOption[]) => void;
   setGameStarted: (started: boolean) => void;
   setGamePhase: (phase: 'lobby' | 'question' | 'elimination' | 'finished') => void;
   setCurrentTurnPlayerId: (playerId: string | null) => void;
@@ -40,6 +44,7 @@ export const useGameStore = create<GameState>((set) => ({
   isAdmin: false,
   players: [],
   options: [],
+  myBoards: {},
   gameStarted: false,
   gamePhase: 'lobby',
   currentTurnPlayerId: null,
@@ -53,6 +58,10 @@ export const useGameStore = create<GameState>((set) => ({
   setRoomName: (roomName) => set({ roomName }),
   setPlayers: (players) => set({ players }),
   setOptions: (options) => set({ options }),
+  setMyBoards: (boards) => set({ myBoards: boards }),
+  updateBoard: (targetPlayerId, options) => set((state) => ({
+    myBoards: { ...state.myBoards, [targetPlayerId]: options }
+  })),
   setGameStarted: (started) => set({ gameStarted: started }),
   setGamePhase: (phase) => set({ gamePhase: phase }),
   setCurrentTurnPlayerId: (playerId) => set({ currentTurnPlayerId: playerId }),
@@ -71,6 +80,7 @@ export const useGameStore = create<GameState>((set) => ({
     isAdmin: false,
     players: [],
     options: [],
+    myBoards: {},
     gameStarted: false,
     gamePhase: 'lobby',
     currentTurnPlayerId: null,

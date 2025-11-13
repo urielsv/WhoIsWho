@@ -113,7 +113,9 @@ app.prepare().then(() => {
         name: roomName,
         players: [player],
         options: gameOptions, // Master list of all options
-        playerOptions: new Map(), // Per-player options: Map<playerId, GameOption[]>
+        // NEW STRUCTURE: Each player has their own private boards for tracking other players
+        // Map<playerId, Map<targetPlayerId, GameOption[]>>
+        playerBoards: new Map(), // Player's private boards for each other player
         gameStarted: false,
         currentTurnPlayerId: null,
         gamePhase: 'lobby',
@@ -223,26 +225,45 @@ app.prepare().then(() => {
       room.asksRespondsPairIndex = 0; // Start with first pair
       room.turnsSinceRotation = 0;
       
-      // Initialize per-player options (each player gets a copy of all options)
+      // Initialize per-player PRIVATE boards (one board for each OTHER player)
       for (const player of room.players) {
-        const playerOptionsCopy = room.options.map(opt => ({ 
-          ...opt,
-          state: 'normal',
-          discardedForPlayerId: null
-        }));
-        room.playerOptions.set(player.id, playerOptionsCopy);
+        const playerBoardsMap = new Map();
+        
+        // Create a private board for each OTHER player (not for self)
+        for (const targetPlayer of room.players) {
+          if (targetPlayer.id !== player.id) {
+            // Each board starts with fresh copies of all options
+            const boardOptions = room.options.map(opt => ({ 
+              ...opt,
+              state: 'normal',
+              discardedForPlayerId: null
+            }));
+            playerBoardsMap.set(targetPlayer.id, boardOptions);
+          }
+        }
+        
+        room.playerBoards.set(player.id, playerBoardsMap);
         player.hasFinished = false;
         player.guessedOptionId = null;
         player.notes = '';
         player.guesses = {}; // Per-player guesses: { targetPlayerId: optionId }
       }
       
-      // Send secret assignments to each player
+      // Send secret assignments and initial boards to each player
       for (const player of room.players) {
         const secretOptionId = room.secretAssignments[player.id];
-        const playerOptions = room.playerOptions.get(player.id);
+        const playerBoardsMap = room.playerBoards.get(player.id);
+        
+        // Convert Map to object for transmission
+        const boardsObject = {};
+        if (playerBoardsMap) {
+          for (const [targetId, options] of playerBoardsMap.entries()) {
+            boardsObject[targetId] = options;
+          }
+        }
+        
         io.to(player.id).emit('secretAssigned', { optionId: secretOptionId });
-        io.to(player.id).emit('playerOptions', { options: playerOptions });
+        io.to(player.id).emit('playerBoards', { boards: boardsObject });
       }
       
       io.to(normalizedRoomId).emit('gameStarted');
@@ -329,26 +350,32 @@ app.prepare().then(() => {
       const player = room.players.find(p => p.id === socket.id);
       if (!player || player.hasFinished) return;
       
-      // Get the player's options
-      const playerOptions = room.playerOptions.get(socket.id);
-      if (!playerOptions) return;
+      // Get the player's PRIVATE board for the target player
+      const playerBoardsMap = room.playerBoards.get(socket.id);
+      if (!playerBoardsMap) return;
       
-      const option = playerOptions.find(o => o.id === optionId);
+      const targetBoard = playerBoardsMap.get(targetPlayerId);
+      if (!targetBoard) return;
+      
+      const option = targetBoard.find(o => o.id === optionId);
       if (!option || option.eliminated) return;
       
       // Simple toggle: normal -> discarded -> normal
       if (!option.state || option.state === 'normal') {
-        // First click: mark as discarded for target player
+        // First click: mark as discarded
         option.state = 'discarded';
-        option.discardedForPlayerId = targetPlayerId || socket.id;
+        option.discardedForPlayerId = targetPlayerId;
       } else if (option.state === 'discarded') {
         // Second click: back to normal (easy undo)
         option.state = 'normal';
         option.discardedForPlayerId = null;
       }
       
-      // Send updated options to this player
-      io.to(socket.id).emit('playerOptions', { options: playerOptions });
+      // Send updated board back to this player only (private)
+      io.to(socket.id).emit('boardUpdated', { 
+        targetPlayerId, 
+        options: targetBoard 
+      });
     });
     
     socket.on('makeGuessForPlayer', ({ roomId, targetPlayerId, optionId }) => {
@@ -408,19 +435,27 @@ app.prepare().then(() => {
       const player = room.players.find(p => p.id === socket.id);
       if (!player || player.hasFinished) return;
       
-      const playerOptions = room.playerOptions.get(socket.id);
-      if (!playerOptions) return;
+      // Get the player's PRIVATE board for the target player
+      const playerBoardsMap = room.playerBoards.get(socket.id);
+      if (!playerBoardsMap) return;
       
-      // Bulk discard multiple options at once
+      const targetBoard = playerBoardsMap.get(targetPlayerId);
+      if (!targetBoard) return;
+      
+      // Bulk discard multiple options at once on this private board
       for (const optionId of optionIds) {
-        const option = playerOptions.find(o => o.id === optionId);
+        const option = targetBoard.find(o => o.id === optionId);
         if (option && !option.eliminated) {
           option.state = 'discarded';
-          option.discardedForPlayerId = targetPlayerId || socket.id;
+          option.discardedForPlayerId = targetPlayerId;
         }
       }
       
-      io.to(socket.id).emit('playerOptions', { options: playerOptions });
+      // Send updated board back to this player only (private)
+      io.to(socket.id).emit('boardUpdated', { 
+        targetPlayerId, 
+        options: targetBoard 
+      });
     });
     
     socket.on('nextTurn', ({ roomId }) => {
@@ -550,23 +585,17 @@ app.prepare().then(() => {
       const room = rooms.get(normalizedRoomId);
       if (!room) return;
       
-      // Get the requesting player's options, filtered by target player
-      const playerOptions = room.playerOptions.get(socket.id);
-      if (!playerOptions) return;
+      // Get the requesting player's PRIVATE board for the target player
+      const playerBoardsMap = room.playerBoards.get(socket.id);
+      if (!playerBoardsMap) return;
       
-      // Filter options discarded for the target player, or show all if viewing own board
-      const filteredOptions = targetPlayerId === socket.id 
-        ? playerOptions 
-        : playerOptions.map(opt => ({
-            ...opt,
-            // Only show if discarded for target player, or if it's a possible guess
-            visible: opt.discardedForPlayerId === targetPlayerId || opt.state === 'possibleGuess' || !opt.state || opt.state === 'normal'
-          })).filter(opt => opt.visible !== false);
+      const targetBoard = playerBoardsMap.get(targetPlayerId);
+      if (!targetBoard) return;
       
-      // Send filtered view
-      io.to(socket.id).emit('playerBoardView', { 
+      // Send the player's private board for this target (already filtered to this player)
+      io.to(socket.id).emit('boardUpdated', { 
         targetPlayerId,
-        options: filteredOptions 
+        options: targetBoard 
       });
     });
     

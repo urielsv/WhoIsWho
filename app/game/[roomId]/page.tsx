@@ -23,6 +23,7 @@ export default function GamePage() {
     playerId, 
     players, 
     options,
+    myBoards,
     gamePhase,
     currentTurnPlayerId,
     mySecretOption,
@@ -31,6 +32,8 @@ export default function GamePage() {
     myGuesses,
     setPlayers,
     setOptions,
+    setMyBoards,
+    updateBoard,
     setGamePhase,
     setCurrentTurnPlayerId,
     setLastQuestion,
@@ -42,11 +45,17 @@ export default function GamePage() {
   const [guessTargetPlayerId, setGuessTargetPlayerId] = useState<string | null>(null); // Which player we're guessing for
   const [showMyGuessModal, setShowMyGuessModal] = useState(false); // Modal for guessing own secret
   const [showHelp, setShowHelp] = useState(false);
-  const [selectedPlayerView, setSelectedPlayerView] = useState<string | null>(null); // Which player's board to view
+  const [selectedBoardView, setSelectedBoardView] = useState<string | null>(null); // Which of MY boards to view (tracking which player)
   const [bulkSelectMode, setBulkSelectMode] = useState(false);
   const [bulkSelectedOptions, setBulkSelectedOptions] = useState<Set<string>>(new Set());
   const [gameResults, setGameResults] = useState<any[]>([]);
   const [gameStats, setGameStats] = useState<any>(null);
+  
+  // Get list of OTHER players (not self) - these are the boards I have
+  const otherPlayers = players.filter(p => p.id !== playerId);
+  
+  // Get the currently selected board's options
+  const currentBoardOptions = selectedBoardView ? (myBoards[selectedBoardView] || []) : [];
 
   const isMyTurn = currentTurnPlayerId === playerId;
   const currentPlayer = players.find(p => p.id === currentTurnPlayerId);
@@ -78,9 +87,9 @@ export default function GamePage() {
       return;
     }
 
-    // Set default view to current player
-    if (!selectedPlayerView && playerId) {
-      setSelectedPlayerView(playerId);
+    // Set default board view to first other player
+    if (!selectedBoardView && otherPlayers.length > 0) {
+      setSelectedBoardView(otherPlayers[0].id);
     }
 
     const handleRoomUpdate = (data: any) => {
@@ -90,15 +99,14 @@ export default function GamePage() {
       setCurrentTurnPlayerId(data.currentTurnPlayerId);
     };
 
-    const handlePlayerOptions = (data: any) => {
-      setOptions(data.options);
+    const handlePlayerBoards = (data: any) => {
+      // Receive all my private boards at game start
+      setMyBoards(data.boards);
     };
 
-    const handlePlayerBoardView = (data: any) => {
-      // Update options when viewing a different player's board
-      if (data.targetPlayerId === selectedPlayerView) {
-        setOptions(data.options);
-      }
+    const handleBoardUpdated = (data: any) => {
+      // Update a specific board when I make changes
+      updateBoard(data.targetPlayerId, data.options);
     };
 
     const handleQuestionAsked = (data: any) => {
@@ -132,8 +140,8 @@ export default function GamePage() {
     };
 
     socket.on('roomUpdate', handleRoomUpdate);
-    socket.on('playerOptions', handlePlayerOptions);
-    socket.on('playerBoardView', handlePlayerBoardView);
+    socket.on('playerBoards', handlePlayerBoards);
+    socket.on('boardUpdated', handleBoardUpdated);
     socket.on('questionAsked', handleQuestionAsked);
     socket.on('turnChanged', handleTurnChanged);
     socket.on('playerGuessed', handlePlayerGuessed);
@@ -143,8 +151,8 @@ export default function GamePage() {
 
     return () => {
       socket.off('roomUpdate', handleRoomUpdate);
-      socket.off('playerOptions', handlePlayerOptions);
-      socket.off('playerBoardView', handlePlayerBoardView);
+      socket.off('playerBoards', handlePlayerBoards);
+      socket.off('boardUpdated', handleBoardUpdated);
       socket.off('questionAsked', handleQuestionAsked);
       socket.off('turnChanged', handleTurnChanged);
       socket.off('playerGuessed', handlePlayerGuessed);
@@ -152,23 +160,18 @@ export default function GamePage() {
       socket.off('gameFinished', handleGameFinished);
       socket.off('pairRotated', handlePairRotated);
     };
-  }, [socket, playerId, roomId, router, setPlayers, setOptions, setGamePhase, setCurrentTurnPlayerId, setLastQuestion, selectedPlayerView]);
+  }, [socket, playerId, roomId, router, setPlayers, setOptions, setMyBoards, updateBoard, setGamePhase, setCurrentTurnPlayerId, setLastQuestion, otherPlayers, selectedBoardView]);
 
-  // Request board view when selected player changes
-  useEffect(() => {
-    if (socket && selectedPlayerView) {
-      socket.emit('getPlayerBoard', { roomId, targetPlayerId: selectedPlayerView });
-    }
-  }, [socket, roomId, selectedPlayerView]);
+  // No need to request boards - they're already in memory (private to client)
 
   const handleAskQuestion = () => {
     socket?.emit('askQuestion', { roomId });
   };
 
   const handleOptionClick = (optionId: string) => {
-    if (hasFinished) return;
+    if (hasFinished || !selectedBoardView) return;
     
-    const option = options.find(o => o.id === optionId);
+    const option = currentBoardOptions.find(o => o.id === optionId);
     if (!option || option.eliminated) return;
 
     // Bulk select mode
@@ -183,23 +186,20 @@ export default function GamePage() {
       return;
     }
 
-    // Simple toggle: click to discard/undiscard for the currently viewed player
-    // This automatically discards for the player whose board we're viewing
-    const targetPlayerId = selectedPlayerView || playerId;
-    
+    // Simple toggle: click to discard/undiscard on MY private board for tracking this player
     socket?.emit('cycleOptionState', { 
       roomId, 
       optionId,
-      targetPlayerId
+      targetPlayerId: selectedBoardView
     });
   };
 
-  const handleBulkDiscard = (targetPlayerId: string) => {
-    if (bulkSelectedOptions.size === 0) return;
+  const handleBulkDiscard = () => {
+    if (bulkSelectedOptions.size === 0 || !selectedBoardView) return;
     socket?.emit('bulkDiscard', {
       roomId,
       optionIds: Array.from(bulkSelectedOptions),
-      targetPlayerId
+      targetPlayerId: selectedBoardView
     });
     setBulkSelectedOptions(new Set());
     setBulkSelectMode(false);
@@ -487,29 +487,23 @@ export default function GamePage() {
                 </p>
               </div>
               <div>
+                <strong className="text-blue-900 dark:text-blue-100">Private Detective Boards:</strong>
+                <p className="text-muted-foreground mt-1">
+                  You have a PRIVATE board for each other player. These are YOUR personal notes that no one else can see. Use them to track who you think each player's secret might be!
+                </p>
+              </div>
+              <div>
                 <strong className="text-blue-900 dark:text-blue-100">Quick Discard:</strong>
                 <ul className="list-disc list-inside mt-1 space-y-1 text-muted-foreground">
-                  <li><strong>Click option:</strong> Toggle discard for the player whose board you're viewing</li>
+                  <li><strong>Click option:</strong> Toggle discard on your current private board</li>
                   <li><strong>Click again:</strong> Undo discard (back to normal)</li>
-                  <li><strong>Switch boards:</strong> Use the player buttons to view different player boards</li>
+                  <li><strong>Switch boards:</strong> Use the tabs to view your boards for different players</li>
                 </ul>
-              </div>
-              <div>
-                <strong className="text-blue-900 dark:text-blue-100">Bulk Operations:</strong>
-                <p className="text-muted-foreground mt-1">
-                  Enable bulk mode to select multiple options, then discard them all at once for faster gameplay.
-                </p>
-              </div>
-              <div>
-                <strong className="text-blue-900 dark:text-blue-100">Player Boards:</strong>
-                <p className="text-muted-foreground mt-1">
-                  Click player buttons to switch between boards. When viewing a player's board, clicking options will discard them for THAT player.
-                </p>
               </div>
               <div>
                 <strong className="text-blue-900 dark:text-blue-100">Making Guesses:</strong>
                 <p className="text-muted-foreground mt-1">
-                  Use the "Make Guess" buttons to guess which option belongs to each player. You can make one guess per player.
+                  Click "Make Guess" on any board to guess which option belongs to that player. You can make one guess per player. Remember, these are YOUR private guesses!
                 </p>
               </div>
             </CardContent>
@@ -591,22 +585,21 @@ export default function GamePage() {
                 </div>
               </CardHeader>
               <CardContent>
-                {/* Player Selector Carousel */}
+                {/* My Private Boards - One for each OTHER player */}
                 <div className="flex items-center gap-2 mb-4 overflow-x-auto pb-2">
-                  {players.map((player) => (
+                  <div className="text-xs text-muted-foreground mr-2 whitespace-nowrap">
+                    My Boards:
+                  </div>
+                  {otherPlayers.map((player) => (
                     <Button
                       key={player.id}
-                      variant={selectedPlayerView === player.id ? "default" : "outline"}
+                      variant={selectedBoardView === player.id ? "default" : "outline"}
                       size="sm"
-                      onClick={() => setSelectedPlayerView(player.id)}
-                      className={cn(
-                        "whitespace-nowrap",
-                        player.id === playerId && "ring-2 ring-yellow-500"
-                      )}
+                      onClick={() => setSelectedBoardView(player.id)}
+                      className="whitespace-nowrap"
                     >
                       <User className="w-4 h-4 mr-1" />
                       {player.username}
-                      {player.id === playerId && ' (You)'}
                       {player.hasFinished && (
                         <CheckCircle className="w-3 h-3 ml-1" />
                       )}
@@ -614,37 +607,35 @@ export default function GamePage() {
                   ))}
                 </div>
 
-                {/* Options Grid for Selected Player */}
+                {/* Options Grid for Selected Board */}
                 <div className="space-y-4">
-                  <div className="flex items-center justify-between p-2 bg-secondary rounded">
+                  <div className="flex items-center justify-between p-3 rounded-lg border-2 bg-blue-50 dark:bg-blue-950 border-blue-400 dark:border-blue-600">
                     <div className="text-sm">
-                      Viewing board for: <strong>{players.find(p => p.id === selectedPlayerView)?.username}</strong>
-                      {selectedPlayerView === playerId && ' (Your Board)'}
+                      <div className="font-semibold text-base mb-1">
+                        📋 Tracking: {players.find(p => p.id === selectedBoardView)?.username}
+                      </div>
+                      <div className="text-xs text-muted-foreground">
+                        Your PRIVATE notes about who {players.find(p => p.id === selectedBoardView)?.username}'s secret might be
+                      </div>
                     </div>
-                    {selectedPlayerView && selectedPlayerView !== playerId && !hasFinished && (
+                    {selectedBoardView && !hasFinished && (
                       <Button
-                        onClick={() => handleMakeGuessForPlayer(selectedPlayerView)}
+                        onClick={() => handleMakeGuessForPlayer(selectedBoardView)}
                         size="sm"
-                        variant={myGuesses[selectedPlayerView] ? "outline" : "default"}
-                        className={myGuesses[selectedPlayerView] ? "border-green-500 text-green-700 dark:text-green-400" : ""}
+                        variant={myGuesses[selectedBoardView] ? "outline" : "default"}
+                        className={myGuesses[selectedBoardView] ? "border-green-500 text-green-700 dark:text-green-400" : ""}
                       >
                         <Star className="w-3 h-3 mr-1" />
-                        {myGuesses[selectedPlayerView] ? 'Change Guess' : `Make Guess for ${players.find(p => p.id === selectedPlayerView)?.username}`}
+                        {myGuesses[selectedBoardView] ? 'Change Guess' : 'Make Guess'}
                       </Button>
                     )}
                   </div>
                   <div className="grid sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
-                    {options.map((option) => {
+                    {currentBoardOptions.map((option) => {
                       const stateLabel = getOptionStateLabel(option.state, option.discardedForPlayerId);
                       const isBulkSelected = bulkSelectedOptions.has(option.id);
-                      const isViewingMyBoard = selectedPlayerView === playerId;
-                      const isDiscardedForThisPlayer = option.discardedForPlayerId === selectedPlayerView;
-                      const isGuessedForViewedPlayer = myGuesses[selectedPlayerView || ''] === option.id;
-                      
-                      // Show all options when viewing own board, or show options relevant to selected player
-                      const shouldShow = isViewingMyBoard || isDiscardedForThisPlayer || !option.state || option.state === 'normal';
-                      
-                      if (!shouldShow) return null;
+                      const isMyGuess = myGuesses[selectedBoardView || ''] === option.id;
+                      const isDiscarded = option.state === 'discarded';
                       
                       return (
                         <button
@@ -656,23 +647,17 @@ export default function GamePage() {
                             option.eliminated && "opacity-30 line-through bg-gray-100 dark:bg-gray-800 cursor-not-allowed",
                             !option.eliminated && !hasFinished && "hover:border-primary cursor-pointer",
                             getOptionStateColor(option.state),
-                            option.id === mySecretOption && !option.eliminated && isViewingMyBoard && "ring-2 ring-yellow-500",
                             isBulkSelected && "ring-4 ring-blue-500 border-blue-500",
-                            isDiscardedForThisPlayer && !isViewingMyBoard && "border-blue-300 dark:border-blue-700",
-                            isGuessedForViewedPlayer && "ring-2 ring-green-500 bg-green-50 dark:bg-green-950"
+                            isDiscarded && "opacity-60",
+                            isMyGuess && "ring-2 ring-green-500 bg-green-50 dark:bg-green-950"
                           )}
                         >
                           <div className="font-medium text-sm break-words">
                             {option.text}
                           </div>
-                          {option.id === mySecretOption && !option.eliminated && isViewingMyBoard && (
-                            <Badge variant="secondary" className="mt-1 text-xs">
-                              Your Secret
-                            </Badge>
-                          )}
-                          {isGuessedForViewedPlayer && (
+                          {isMyGuess && (
                             <Badge variant="default" className="mt-1 text-xs bg-green-600">
-                              Your Guess
+                              My Guess
                             </Badge>
                           )}
                           {stateLabel && (
@@ -699,21 +684,15 @@ export default function GamePage() {
                         <div className="flex items-center justify-between">
                           <div>
                             <p className="font-medium">{bulkSelectedOptions.size} options selected</p>
-                            <p className="text-sm text-muted-foreground">Choose a player to discard for:</p>
+                            <p className="text-sm text-muted-foreground">Discard all selected on this board</p>
                           </div>
-                          <div className="flex gap-2">
-                            {players.map((player) => (
-                              <Button
-                                key={player.id}
-                                onClick={() => handleBulkDiscard(player.id)}
-                                size="sm"
-                                variant="outline"
-                              >
-                                <User className="w-3 h-3 mr-1" />
-                                {player.username}
-                              </Button>
-                            ))}
-                          </div>
+                          <Button
+                            onClick={handleBulkDiscard}
+                            size="sm"
+                            variant="default"
+                          >
+                            Discard Selected
+                          </Button>
                         </div>
                       </CardContent>
                     </Card>
@@ -731,7 +710,7 @@ export default function GamePage() {
                         Give Up
                       </Button>
                       <p className="text-xs text-muted-foreground self-center">
-                        💡 Tip: Switch player boards to make guesses for each player
+                        💡 Tip: Each board is YOUR private detective notes - other players can't see them!
                       </p>
                     </div>
                   )}
